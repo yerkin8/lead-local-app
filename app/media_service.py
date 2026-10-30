@@ -11,11 +11,8 @@ from .domain import org_id
 from .config import MEDIA_DIR
 from .media import MediaError, delete_media_files, job_folder, validate_org_url
 
-SECTIONS = {"Внутри", "Еда", "Меню"}
 
-
-def start(kind: str, *, business_id: str | None = None, url: str | None = None,
-          sections: dict[str, int] | None = None, repeat: bool = False) -> dict:
+def _resolve_url(business_id: str | None, url: str | None) -> tuple[str, str, str | None]:
     if (business_id is None) == (url is None):
         raise MediaError("Выберите организацию или вставьте ссылку")
     if business_id is not None:
@@ -29,12 +26,59 @@ def start(kind: str, *, business_id: str | None = None, url: str | None = None,
         raise MediaError("В ссылке нет ID организации")
     if business_id is None and db.business(identity):
         business_id = identity
+    return validated, identity, business_id
+
+
+def _gallery_request(selection: object, sections: object, per_section_limit: object,
+                     organization_limit: object) -> dict:
+    """Normalize new dynamic selections and old saved section-count maps."""
+    from .desktop_gallery import normalize_section_name, normalize_selection
+
+    per_section_limits = None
+    if selection is None and isinstance(sections, dict):
+        names = []
+        per_section_limits = {}
+        for raw_name, raw_count in sections.items():
+            name = str(raw_name).strip()
+            if (not name or len(name) > 100 or isinstance(raw_count, bool)
+                    or not isinstance(raw_count, int) or not 1 <= raw_count <= 50):
+                raise MediaError("Сохранённый список разделов содержит неверные значения")
+            names.append(name)
+            per_section_limits[normalize_section_name(name).casefold()] = raw_count
+        selection = {"mode": "selected", "names": names}
+        per_section_limit = max(per_section_limits.values(), default=10)
+    try:
+        if selection is None:
+            raise ValueError("Сначала найдите разделы галереи")
+        if isinstance(per_section_limit, bool) or isinstance(organization_limit, bool):
+            raise ValueError("Лимиты должны быть целыми числами")
+        normalized = normalize_selection(selection)
+        if not isinstance(per_section_limit, int) and not (
+                isinstance(per_section_limit, str) and per_section_limit.strip().isdecimal()):
+            raise ValueError("Лимит фотографий на раздел должен быть целым числом")
+        if not isinstance(organization_limit, int) and not (
+                isinstance(organization_limit, str) and organization_limit.strip().isdecimal()):
+            raise ValueError("Общий лимит фотографий должен быть целым числом")
+        section_limit = int(per_section_limit)
+        total_limit = int(organization_limit)
+    except (TypeError, ValueError) as error:
+        raise MediaError(str(error) or "Проверьте выбор разделов галереи") from error
+    if not 1 <= section_limit <= 50:
+        raise MediaError("Лимит фотографий на раздел должен быть от 1 до 50")
+    if not 1 <= total_limit <= 200:
+        raise MediaError("Общий лимит фотографий должен быть от 1 до 200")
+    return {"selection": normalized, "per_section_limit": section_limit,
+            "organization_limit": total_limit, "per_section_limits": per_section_limits or {}}
+
+
+def start(kind: str, *, business_id: str | None = None, url: str | None = None,
+          sections: dict[str, int] | None = None, selection: object = None,
+          per_section_limit: object = 10, organization_limit: object = 50,
+          repeat: bool = False) -> dict:
+    validated, identity, business_id = _resolve_url(business_id, url)
     if kind == "images":
-        if not sections or any(key not in SECTIONS or not isinstance(value, int)
-                               or isinstance(value, bool) or not 1 <= value <= 50
-                               for key, value in sections.items()):
-            raise MediaError("Для галереи выберите секции и количество от 1 до 50")
-        params = {"url": validated, "sections": sections}
+        request = _gallery_request(selection, sections, per_section_limit, organization_limit)
+        params = {"url": validated, **request}
     elif kind == "products":
         params = {"url": validated}
     else:
@@ -44,6 +88,30 @@ def start(kind: str, *, business_id: str | None = None, url: str | None = None,
     item["organization_id"] = identity
     item["created"] = created
     return item
+
+
+def discover_sections(*, business_id: str | None = None, url: str | None = None) -> dict:
+    """Desktop preflight: find the current gallery labels before an image job is queued."""
+    validated, _, _ = _resolve_url(business_id, url)
+    from .desktop_gallery import discover_sections as discover
+    return discover(validated)
+
+
+def resume_images(job_id: str) -> dict:
+    """Requeue a failed desktop gallery task while keeping its partial image files."""
+    with db.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT kind,status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row or row["kind"] != "images":
+            raise MediaError("Задание галереи не найдено")
+        if row["status"] in {"queued", "running"}:
+            pass
+        elif row["status"] != "failed":
+            raise MediaError("Продолжить можно только прерванное задание галереи")
+        else:
+            conn.execute("UPDATE jobs SET status='queued',error=NULL,result='{}',updated_at=? WHERE id=?",
+                         (db.now(), job_id))
+    return db.job(job_id)
 
 
 def list_jobs(business_id: str | None = None) -> list[dict]:

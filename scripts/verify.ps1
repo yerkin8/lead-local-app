@@ -22,13 +22,24 @@ function Run-Check([string]$Name, [scriptblock]$Command) {
 
 Run-Check 'Тест менеджера опроса' { node --test tests\activity-poller.test.cjs }
 Run-Check 'Тест снимка активности SQLite' { & $Python -m unittest tests.test_activity_snapshot -v }
-Run-Check 'Компиляция backend-моста' { & $Python -m compileall -q app\db.py app\desktop.py }
+Run-Check 'Тест ручных ссылок Telegram' { & $Python -m unittest tests.test_phone_links -v }
+Run-Check 'Тест расширенных данных организаций Stage 3' { & $Python -m unittest tests.test_business_details -v }
+Run-Check 'Тест динамических разделов галереи desktop Stage 4' { & $Python -m unittest tests.test_desktop_gallery -v }
+Run-Check 'Тест иерархии запусков базы desktop Stage 5' { & $Python -m unittest tests.test_parse_runs -v }
+Run-Check 'Нормализация ссылок Яндекса Stage 9' { & $Python -m unittest tests.test_yandex_urls -v }
+Run-Check 'Тест данных превью папок Stage 6' { & $Python -m unittest tests.test_folder_preview_data -v }
+Run-Check 'Отсутствие авторизации и рассылки в desktop UI' { & $Python scripts\check_desktop_telegram_surface.py }
+Run-Check 'Компиляция backend-парсера и моста' { & $Python -m compileall -q app\db.py app\lead_parser.py app\desktop_gallery.py app\media_service.py app\desktop_services.py app\desktop.py }
 Run-Check 'Синтаксис JavaScript desktop' {
   node --check app\desktop_ui\activity-poller.js
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   node --check app\desktop_ui\app.js
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   node --check app\desktop_ui\flows.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\stage9.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\glass-folder.js
 }
 Run-Check 'Запрет автопереходов и отдельных интервалов' { & $Python scripts\check_refresh_sources.py }
 Run-Check 'Токены, контраст и локальные шрифты desktop' { & $Python scripts\check_desktop_theme.py --report verification\design\theme-static-check.txt }

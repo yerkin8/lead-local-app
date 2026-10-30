@@ -65,8 +65,8 @@ Assert-CommandSuccess 'Не удалось создать чистое вирт�
 $BuildPython = Join-Path $BuildVenv 'Scripts\python.exe'
 & $BuildPython -m pip install --disable-pip-version-check --no-input -r (Join-Path $ProjectRoot 'requirements-exe-lock.txt')
 Assert-CommandSuccess 'Не удалось установить зафиксированные зависимости'
-& $BuildPython (Join-Path $ProjectRoot 'scripts\make_app_icon.py')
-Assert-CommandSuccess 'Не удалось подготовить иконку приложения'
+$IconPath = Join-Path $ProjectRoot 'app\assets\lem-icon.ico'
+if (-not (Test-Path -LiteralPath $IconPath)) { throw "Не найдена иконка приложения: $IconPath" }
 
 $BuildDir = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot 'build'))
 $DistDir = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot 'dist\LeadEqualMoney'))

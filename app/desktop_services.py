@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import uuid
+import unicodedata
 from pathlib import Path
 
 from . import db
@@ -26,6 +27,7 @@ class LocalWorker:
         with db.connection() as conn:
             # An interrupted send must not be repeated automatically.
             conn.execute("UPDATE jobs SET status='queued' WHERE status='running' AND kind IN ('search','images','products')")
+            conn.execute("UPDATE parse_runs SET status='queued',ended_at=NULL WHERE status='running'")
             conn.execute("""UPDATE campaigns SET status='interrupted',
                 error='Приложение закрылось во время рассылки; проверьте результат вручную',updated_at=?
                 WHERE status IN ('queued','running')""", (db.now(),))
@@ -45,34 +47,70 @@ class LocalWorker:
 
     def loop(self):
         from .lead_parser import run_search
-        from .media import delete_media_files, run_images, run_products
+        from .desktop_gallery import run_gallery_images
+        from .media import delete_media_files, run_products
 
-        runners = {"search": run_search, "images": run_images, "products": run_products}
+        runners = {"search": run_search, "images": run_gallery_images, "products": run_products}
         while not self.stop.is_set():
             item = db.claim_job()
             if not item:
                 self.stop.wait(1)
                 continue
             try:
+                if item["kind"] == "search":
+                    item["params"]["_desktop_details"] = True
+                    parse_run_id = item["params"].get("_desktop_parse_run_id")
+                    if parse_run_id:
+                        db.start_parse_run(parse_run_id)
                 result = runners[item["kind"]](item)
                 db.update_job(item["id"], status="done", result=result)
+                if item["kind"] == "search" and item["params"].get("_desktop_parse_run_id"):
+                    db.finish_parse_run(item["params"]["_desktop_parse_run_id"], "done")
             except Exception as exc:
-                if item["kind"] in {"images", "products"}:
+                if item["kind"] == "products":
                     delete_media_files(item["id"])
                 db.update_job(item["id"], status="failed", error=str(exc)[:1000])
+                if item["kind"] == "search" and item["params"].get("_desktop_parse_run_id"):
+                    db.finish_parse_run(item["params"]["_desktop_parse_run_id"], "failed")
 
 
 def validate_search(payload: dict) -> dict:
     country = str(payload.get("country", "")).strip()
-    city = str(payload.get("city", "")).strip()
-    niche = str(payload.get("niche", "")).strip()
+    raw_cities = payload.get("cities", payload.get("city", ""))
+    if isinstance(raw_cities, (list, tuple)):
+        city_items = [str(value) for value in raw_cities]
+    else:
+        city_items = re.split(r"[,;\n\r]+", str(raw_cities or ""))
+    cities = []
+    seen_cities = set()
+    for value in city_items:
+        city = re.sub(r"\s+", " ", value).strip()
+        key = unicodedata.normalize("NFKC", city).casefold().replace("ё", "е")
+        if city and key not in seen_cities:
+            cities.append(city)
+            seen_cities.add(key)
+    niche = re.sub(r"\s+", " ", str(payload.get("niche", ""))).strip()
+    city = cities[0] if cities else ""
     count = int(payload.get("count", 0))
     types = list(dict.fromkeys(payload.get("types") or []))
-    if country not in COUNTRIES or not 2 <= len(city) <= 100 or not 2 <= len(niche) <= 100:
-        raise ValueError("Проверьте страну, город и нишу")
+    review_limit = int(payload.get("review_limit", 20))
+    if (country not in COUNTRIES or not cities or len(cities) > 20
+            or any(not 2 <= len(item) <= 100 for item in cities) or not 2 <= len(niche) <= 100):
+        raise ValueError("Проверьте страну, список городов и нишу (от 1 до 20 городов)")
     if not 1 <= count <= 100 or not types or not set(types) <= SITE_TYPES:
         raise ValueError("Укажите цель от 1 до 100 и типы сайтов")
-    return {"country": country, "city": city, "niche": niche, "count": count, "types": types}
+    if not 0 <= review_limit <= 100:
+        raise ValueError("Лимит отзывов должен быть от 0 до 100")
+    return {"country": country, "city": city, "cities": cities, "niche": niche, "count": count,
+            "types": types, "review_limit": review_limit}
+
+
+def start_desktop_search(payload: dict) -> dict:
+    params = validate_search(payload)
+    cities = params.pop("cities")
+    params.pop("city", None)
+    jobs = db.create_desktop_parse_jobs(params, cities)
+    return {"jobs": jobs, "count": len(jobs)}
 
 
 def search_results(job_id: str) -> list[dict]:
@@ -86,7 +124,7 @@ def search_results(job_id: str) -> list[dict]:
 
 
 def refresh_business(business_id: str) -> dict:
-    from .lead_parser import make_driver, parse_org
+    from .lead_parser import make_driver, parse_org, collect_gallery_photo_count, collect_reviews_browser
 
     existing = db.business(business_id)
     if not existing:
@@ -94,12 +132,17 @@ def refresh_business(business_id: str) -> dict:
     driver = make_driver()
     try:
         data = parse_org(driver, existing["map_url"])
+        if data["id"] != business_id:
+            raise ValueError("Яндекс вернул другую организацию")
+        db.refresh_business(data, store_details=True, review_limit=100)
+        photo_count = collect_gallery_photo_count(driver, data["gallery_url"], existing["map_url"])
+        if photo_count is not None:
+            data["details"]["photo_count"] = photo_count
+            db.refresh_business(data, store_details=True, review_limit=100)
+        collect_reviews_browser(driver, data["review_url"], business_id, 100)
     finally:
         quit_driver(driver)
-    if data["id"] != business_id:
-        raise ValueError("Яндекс вернул другую организацию")
-    db.refresh_business(data)
-    return db.business(business_id)
+    return db.business_full(business_id)
 
 
 EXPORT_COLUMNS = ["id", "name", "category", "phones", "socials", "website", "site_type",
@@ -107,7 +150,11 @@ EXPORT_COLUMNS = ["id", "name", "category", "phones", "socials", "website", "sit
                   "niche", "country", "city"]
 
 
-def export_xlsx(target: str) -> dict:
+def _safe_xlsx_value(value):
+    return "'" + value if isinstance(value, str) and value[:1] in {"=", "+", "-", "@"} else value
+
+
+def export_xlsx(target: str, scope: dict | None = None, *, db_path: Path = DB_PATH) -> dict:
     from openpyxl import Workbook
 
     path = Path(target).expanduser().resolve()
@@ -117,18 +164,49 @@ def export_xlsx(target: str) -> dict:
     sheet = book.active
     sheet.title = "Организации"
     sheet.append(EXPORT_COLUMNS)
-    with db.connection() as conn:
+    with db.connection(db_path) as conn:
         rows = conn.execute("""SELECT b.*,t.niche,t.country,t.city FROM businesses b
             LEFT JOIN business_tags t ON t.business_id=b.id
             WHERE t.rowid=(SELECT MIN(rowid) FROM business_tags WHERE business_id=b.id)
                OR t.business_id IS NULL ORDER BY b.created_at""").fetchall()
+        details_rows = conn.execute("""SELECT d.business_id,d.description,d.latitude,d.longitude,d.photo_count,
+            d.categories_json FROM business_details d ORDER BY d.business_id""").fetchall()
+        review_rows = conn.execute("""SELECT b.id AS business_id,r.text,r.rating,r.review_date AS date,r.company_response
+            FROM reviews r JOIN businesses b ON b.id=r.business_id ORDER BY b.id,r.review_date,r.id""").fetchall()
+        link_rows = conn.execute("""SELECT b.id AS business_id,l.type,l.url,l.label FROM links l JOIN businesses b
+            ON b.id=l.business_id ORDER BY b.id,l.type,l.url""").fetchall()
+        hour_rows = conn.execute("""SELECT b.id AS business_id,h.weekday,h.opens,h.closes,h.is_closed,h.raw FROM hours h
+            JOIN businesses b ON b.id=h.business_id ORDER BY b.id,h.weekday,h.opens""").fetchall()
+        feature_rows = conn.execute("""SELECT b.id AS business_id,f.name,f.value FROM features f JOIN businesses b
+            ON b.id=f.business_id ORDER BY b.id,f.name,f.value""").fetchall()
+    if scope is not None:
+        allowed = db.business_ids_for_scope(scope, db_path)
+        rows = [row for row in rows if row["id"] in allowed]
+        details_rows = [row for row in details_rows if row["business_id"] in allowed]
+        review_rows = [row for row in review_rows if row["business_id"] in allowed]
+        link_rows = [row for row in link_rows if row["business_id"] in allowed]
+        hour_rows = [row for row in hour_rows if row["business_id"] in allowed]
+        feature_rows = [row for row in feature_rows if row["business_id"] in allowed]
     for row in rows:
         # Excel must treat imported user text as text, never as a formula.
-        sheet.append(["'" + row[key] if isinstance(row[key], str) and row[key][:1] in {"=", "+", "-", "@"}
-                      else row[key] for key in EXPORT_COLUMNS])
+        sheet.append([_safe_xlsx_value(row[key]) for key in EXPORT_COLUMNS])
+    detail_sheets = (
+        ("Подробности", ["business_id", "description", "latitude", "longitude", "photo_count", "categories_json"], details_rows),
+        ("Отзывы", ["business_id", "text", "rating", "date", "company_response"], review_rows),
+        ("Ссылки", ["business_id", "type", "url", "label"], link_rows),
+        ("График", ["business_id", "weekday", "opens", "closes", "is_closed", "raw"], hour_rows),
+        ("Особенности", ["business_id", "name", "value"], feature_rows),
+    )
+    counts = {"organizations": len(rows)}
+    for title, columns, items in detail_sheets:
+        target_sheet = book.create_sheet(title)
+        target_sheet.append(columns)
+        for item in items:
+            target_sheet.append([_safe_xlsx_value(item[column]) for column in columns])
+        counts[title] = len(items)
     path.parent.mkdir(parents=True, exist_ok=True)
     book.save(path)
-    return {"path": str(path), "count": len(rows)}
+    return {"path": str(path), "count": len(rows), "details": counts}
 
 
 def import_xlsx(source: str) -> dict:
@@ -273,7 +351,7 @@ def import_sqlite(source: str) -> dict:
                 if not default or default["body"] == TEMPLATES.get(row["slug"], (None, None))[1]:
                     target.execute("INSERT INTO templates VALUES (?,?,?,?) ON CONFLICT(slug) DO UPDATE SET title=excluded.title,body=excluded.body,updated_at=excluded.updated_at",
                                    tuple(row))
-        db.init_db()
+        db.init_desktop_db()
         old_media = path.parent / "media"
         if old_media.is_dir():
             from .config import MEDIA_DIR

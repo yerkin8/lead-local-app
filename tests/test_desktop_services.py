@@ -25,7 +25,7 @@ class DesktopMigrationTests(unittest.TestCase):
 import json,sys
 from app import db
 from app.desktop_services import import_xlsx
-db.init_db();a=import_xlsx(sys.argv[1]);db.set_business('555','waiting','Сохранить заметку')
+db.init_desktop_db();a=import_xlsx(sys.argv[1]);db.set_business('555','waiting','Сохранить заметку')
 b=import_xlsx(sys.argv[1]);item=db.business('555')
 print(json.dumps({'first':a,'second':b,'item':item},ensure_ascii=False))
 """
@@ -59,7 +59,7 @@ print(json.dumps({'first':a,'second':b,'item':item},ensure_ascii=False))
 import json,sys
 from app import db
 from app.desktop_services import import_sqlite, export_xlsx, import_xlsx
-db.init_db()
+db.init_desktop_db()
 first=import_sqlite(sys.argv[1])
 second=import_sqlite(sys.argv[1])
 item=db.business('456')
@@ -87,7 +87,7 @@ print(json.dumps({'first':first,'second':second,'item':item,
             code = """
 import json
 from app import db,telegram_sender as sender
-db.init_db(); job=db.create_job('search',{})
+db.init_desktop_db(); job=db.create_job('search',{})
 for identity in ('101','102'):
  db.upsert_business({'id':identity,'name':'Кафе '+identity,'site_type':'no_site',
   'map_url':f'https://yandex.ru/maps/org/x/{identity}/',
@@ -195,7 +195,7 @@ print(json.dumps({'result':result,'calls':calls,'linked':db.business('301')['tel
 import json
 from app import db,telegram_sender as sender
 from app.desktop_services import LocalWorker
-db.init_db();j=db.create_job('search',{})
+db.init_desktop_db();j=db.create_job('search',{})
 db.upsert_business({'id':'401','name':'Кафе','site_type':'no_site',
  'map_url':'https://yandex.ru/maps/org/x/401/',
  'socials':[{'url':'https://t.me/testuser401'}]},('кафе','Россия','Казань'),j)

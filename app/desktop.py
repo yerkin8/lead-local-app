@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import msvcrt
+import json
 import webbrowser
 import shutil
 import logging
@@ -13,10 +14,168 @@ from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import url2pathname
+from .phone_links import build_telegram_phone_links
 
 APP_NAME = "LeadEqualMoney"
 APP_VERSION = "1.0.0"
 DATA_MIGRATION_NOTICE = ""
+TELEGRAM_MTPROTO_ENABLED = False
+
+
+def resource_path(relative_path: str) -> Path:
+    """Resolve bundled files independently of the process working directory."""
+    relative = Path(relative_path)
+    roots: list[Path] = []
+    if getattr(sys, "frozen", False):
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root:
+            roots.append(Path(bundle_root))
+        executable_dir = Path(sys.executable).resolve().parent
+        roots.extend((executable_dir / "_internal", executable_dir))
+    else:
+        roots.append(Path(__file__).resolve().parent.parent)
+
+    candidates = [root / relative for root in roots]
+    return next((path for path in candidates if path.is_file()), candidates[0])
+
+
+def _monitor_work_areas() -> list[tuple[int, int, int, int, bool]]:
+    """Return Windows monitor work areas in the logical pixels used by pywebview."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class Rect(ctypes.Structure):
+        _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                    ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", Rect),
+                    ("rcWork", Rect), ("dwFlags", wintypes.DWORD)]
+
+    areas: list[tuple[int, int, int, int, bool]] = []
+    user32 = ctypes.windll.user32
+    try:
+        dpi = user32.GetDpiForSystem()
+        scale = float(dpi) / 96 if dpi else 1.0
+    except (AttributeError, OSError):
+        scale = 1.0
+
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.HDC,
+                                       ctypes.POINTER(Rect), wintypes.LPARAM)
+    user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+    user32.GetMonitorInfoW.restype = wintypes.BOOL
+    user32.EnumDisplayMonitors.argtypes = [wintypes.HDC, ctypes.POINTER(Rect),
+                                           callback_type, wintypes.LPARAM]
+    user32.EnumDisplayMonitors.restype = wintypes.BOOL
+
+    def collect(monitor, _dc, _rect, _data):
+        info = MonitorInfo()
+        info.cbSize = ctypes.sizeof(MonitorInfo)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            work = info.rcWork
+            areas.append((round(work.left / scale), round(work.top / scale),
+                          round(work.right / scale), round(work.bottom / scale),
+                          bool(info.dwFlags & 1)))
+        return 1
+
+    callback = callback_type(collect)
+    user32.EnumDisplayMonitors(None, None, callback, 0)
+    return sorted(areas, key=lambda area: not area[4])
+
+
+def _initial_window_geometry(path: Path) -> dict[str, int | None]:
+    """Restore a visible window size and position, or use the primary monitor."""
+    monitors = _monitor_work_areas()
+    primary = next((item for item in monitors if item[4]), monitors[0] if monitors else None)
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(saved, dict):
+            saved = {}
+    except (OSError, ValueError, TypeError):
+        saved = {}
+
+    def dimension(key: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(saved.get(key, default))
+        except (ValueError, TypeError, OverflowError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    width = dimension("width", 1366, 1024, 4096)
+    height = dimension("height", 850, 700, 2160)
+    x = saved.get("x")
+    y = saved.get("y")
+    if isinstance(x, bool) or not isinstance(x, int):
+        x = None
+    if isinstance(y, bool) or not isinstance(y, int):
+        y = None
+
+    if primary:
+        left, top, right, bottom, _ = primary
+        width = min(width, max(1024, right - left))
+        height = min(height, max(700, bottom - top))
+    else:
+        width, height = min(width, 1366), min(height, 850)
+
+    if x is not None and y is not None:
+        for left, top, right, bottom, _ in monitors:
+            overlap_width = max(0, min(x + width, right) - max(x, left))
+            overlap_height = max(0, min(y + height, bottom) - max(y, top))
+            if overlap_width >= min(200, width) and overlap_height >= 80:
+                width = min(width, max(1024, right - left))
+                height = min(height, max(700, bottom - top))
+                x = min(max(x, left), max(left, right - width))
+                y = min(max(y, top), max(top, bottom - height))
+                return {"x": x, "y": y, "width": width, "height": height}
+
+    return {"x": None, "y": None, "width": width, "height": height}
+
+
+class _WindowGeometryStore:
+    """Debounced, atomic window geometry persistence in the user's data directory."""
+
+    def __init__(self, path: Path, initial: dict[str, int | None]):
+        self.path = path
+        self._state = dict(initial)
+        self._lock = threading.RLock()
+        self._timer: threading.Timer | None = None
+
+    def update(self, **values: int) -> None:
+        with self._lock:
+            self._state.update(values)
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(0.6, self.flush)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+            temporary = self.path.with_suffix(".tmp")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                temporary.write_text(json.dumps(self._state, ensure_ascii=False), encoding="utf-8")
+                temporary.replace(self.path)
+            except OSError:
+                logging.getLogger("LeadEqualMoney").exception("Не удалось сохранить размер и положение окна")
+
+
+def _is_local_app_navigation(url: str, page_path: Path) -> bool:
+    """Allow WebView2 to stay on the bundled desktop page only."""
+    parsed = urlparse(str(url))
+    if parsed.scheme.casefold() != "file" or parsed.netloc not in {"", "localhost"}:
+        return False
+    try:
+        target = Path(url2pathname(parsed.path)).resolve(strict=True)
+        return os.path.normcase(str(target)) == os.path.normcase(str(page_path.resolve(strict=True)))
+    except (OSError, ValueError):
+        return False
 
 
 def _message_box(message: str, title: str = APP_NAME) -> None:
@@ -83,10 +242,12 @@ class AlreadyRunningError(RuntimeError):
 _configure_user_data_dir()
 
 # Configure the user profile before importing modules whose paths are fixed at import time.
-from . import db, media_service, telegram_sender
+from . import db, media_service
 from .config import DATA_DIR
-from .desktop_services import LocalWorker, backup_database, export_xlsx, import_xlsx, import_sqlite, refresh_business, search_results, validate_search
-from .domain import COUNTRIES, SITE_TYPES, STATUSES, render_template
+from .desktop_services import (LocalWorker, backup_database, export_xlsx, import_xlsx,
+                               import_sqlite, refresh_business, search_results,
+                               start_desktop_search)
+from .domain import COUNTRIES, SITE_TYPES, STATUSES
 
 
 def _configure_logging() -> None:
@@ -127,7 +288,8 @@ class Bridge:
     def bootstrap(self):
         return self._result(lambda: {"countries": COUNTRIES, "statuses": STATUSES,
                                      "site_types": sorted(SITE_TYPES), "data_dir": str(DATA_DIR),
-                                     "stats": db.stats(), "telegram": telegram_sender.state(),
+                                     "stats": db.stats(),
+                                     "telegram_mtproto_enabled": TELEGRAM_MTPROTO_ENABLED,
                                      "first_run": not (DATA_DIR / "first_run_complete").exists(),
                                      "version": APP_VERSION,
                                      "migration_notice": DATA_MIGRATION_NOTICE})
@@ -150,13 +312,32 @@ class Bridge:
         return self._result(db.stats)
 
     def search_start(self, payload):
-        return self._result(lambda: db.create_job("search", validate_search(payload)))
+        return self._result(start_desktop_search, payload)
 
     def search_jobs(self):
         return self._result(lambda: db.list_jobs("search"))
 
     def search_results(self, job_id):
         return self._result(search_results, job_id)
+
+    def parse_niches(self):
+        return self._result(db.parse_niches)
+
+    def parse_cities(self, niche_key):
+        return self._result(db.parse_cities, str(niche_key))
+
+    def parse_runs(self, niche_key, city_key):
+        return self._result(db.parse_runs_for_city, str(niche_key), str(city_key))
+
+    def parse_run_businesses(self, run_id, filters=None):
+        options = dict(filters or {})
+        limit = min(200, max(1, int(options.get("limit", 50))))
+        offset = max(0, int(options.get("offset", 0)))
+        query = str(options.get("q", "")).strip()
+        status = str(options.get("status", "")).strip() or None
+        site_type = str(options.get("site_type", "")).strip() or None
+        return self._result(db.parse_run_businesses, str(run_id), query=query, limit=limit,
+                            offset=offset, status=status, site_type=site_type)
 
     def businesses(self, filters=None):
         def run():
@@ -171,25 +352,74 @@ class Bridge:
 
 
     def business(self, identity):
-        return self._result(db.business, identity)
+        return self._result(db.business_full, identity)
 
     def business_save(self, identity, status=None, note=None):
         return self._result(lambda: db.business(identity) if db.set_business(identity, status, note) else None)
 
-    def business_suppress(self, identity, blocked, reason=""):
-        return self._result(lambda: db.business(identity) if db.set_suppression(identity, bool(blocked), reason) else None)
+    def templates(self):
+        return self._result(db.templates)
+
+    def template_save(self, slug, body):
+        def run():
+            text = str(body or "").strip()
+            if not text:
+                raise ValueError("Текст скрипта не может быть пустым")
+            if len(text) > 20000:
+                raise ValueError("Текст скрипта слишком длинный")
+            if not db.save_template(str(slug), text):
+                raise ValueError("Скрипт не найден")
+            return True
+        return self._result(run)
+
+    def business_scripts(self, identity):
+        def run():
+            from .domain import render_template
+            from .script_templates import FIRST_BY_SITE_TYPE
+            item = db.business(str(identity))
+            if not item:
+                raise ValueError("Организация не найдена")
+            rows = db.templates()
+            preferred = FIRST_BY_SITE_TYPE.get(item.get("site_type"), "first")
+            return {"preferred": preferred, "items": [
+                {**row, "text": render_template(row["body"], item)} for row in rows
+            ]}
+        return self._result(run)
+
+    def frontend_error(self, message, source="", line=0, column=0):
+        def run():
+            logging.getLogger("LeadEqualMoney.frontend").error(
+                "JS: %s (%s:%s:%s)", str(message)[:2000], str(source)[:500], line, column)
+            return True
+        return self._result(run)
 
     def business_refresh(self, identity):
         return self._result(refresh_business, identity)
 
+    def debug_html_enabled(self):
+        return self._result(db.desktop_diagnostics_enabled)
+
+    def set_debug_html_enabled(self, enabled):
+        return self._result(db.set_desktop_diagnostics_enabled, bool(enabled))
+
     def media_start(self, kind, payload):
         return self._result(media_service.start, kind, **payload)
+
+    def media_discover_sections(self, payload):
+        return self._result(media_service.discover_sections, **payload)
+
+    def media_resume(self, job_id):
+        return self._result(media_service.resume_images, job_id)
 
     def media_jobs(self, business_id=None):
         return self._result(media_service.list_jobs, business_id)
 
     def activity_snapshot(self, known=None):
-        return self._result(db.activity_snapshot, known)
+        request = dict(known) if isinstance(known, dict) else {}
+        topics = request.get("topics", ["search", "media"])
+        request["topics"] = [topic for topic in topics if topic in {"search", "media"}] \
+            if isinstance(topics, (list, tuple, set)) else ["search", "media"]
+        return self._result(db.activity_snapshot, request)
 
     def media_open(self, job_id, name=""):
         return self._result(media_service.open_archive, job_id, name)
@@ -204,21 +434,6 @@ class Bridge:
     def media_delete(self, job_id):
         return self._result(media_service.delete, job_id)
 
-    def templates(self):
-        return self._result(db.templates)
-
-    def template_save(self, slug, body):
-        return self._result(db.save_template, slug, body)
-
-    def template_render(self, slug, business_id):
-        def render():
-            item = db.business(business_id)
-            template = next((row for row in db.templates() if row["slug"] == slug), None)
-            if not item or not template:
-                raise ValueError("Организация или скрипт не найдены")
-            return render_template(template["body"], item)
-        return self._result(render)
-
     def import_xlsx(self):
         def run():
             path = self._dialog("OPEN", file_types=("Excel (*.xlsx)",))
@@ -232,6 +447,13 @@ class Bridge:
             return export_xlsx(path) if path else None
         return self._result(run)
 
+    def export_scope(self, scope):
+        def run():
+            path = self._dialog("SAVE", save_filename="lem-export.xlsx",
+                                file_types=("Excel (*.xlsx)",))
+            return export_xlsx(path, dict(scope or {})) if path else None
+        return self._result(run)
+
     def backup(self):
         return self._result(backup_database)
 
@@ -241,67 +463,23 @@ class Bridge:
             return import_sqlite(path) if path else None
         return self._result(run)
 
-    def telegram_state(self):
-        return self._result(telegram_sender.state)
-
-    def telegram_policy_save(self, daily_limit, delay_seconds):
-        return self._result(telegram_sender.configure_send_policy, daily_limit, delay_seconds)
-
-    def contact_permissions(self, status="blocked"):
-        return self._result(db.list_contact_permissions, status)
-
-    def telegram_configure(self, api_id, api_hash, phone):
-        return self._result(telegram_sender.configure, api_id, api_hash, phone)
-
-    def telegram_request_code(self):
-        return self._result(telegram_sender.request_code)
-
-    def telegram_sign_in(self, code, password=""):
-        return self._result(telegram_sender.sign_in, code, password)
-
-    def telegram_check_phone(self, business_id, phone):
-        return self._result(telegram_sender.check_phone, business_id, phone)
-
-    def campaign_create(self, title, business_ids, template_slug, overrides=None):
-        return self._result(telegram_sender.create_draft, title, business_ids, template_slug, overrides)
-
-    def campaign_list(self):
-        return self._result(telegram_sender.campaigns)
-
-    def campaign_get(self, campaign_id):
-        return self._result(telegram_sender.campaign, campaign_id)
-
-    def campaign_update_recipient(self, campaign_id, business_id, message):
-        return self._result(telegram_sender.update_recipient, campaign_id, business_id, message)
-
-    def campaign_start(self, campaign_id):
-        return self._result(telegram_sender.start, campaign_id)
-
-    def campaign_check(self, campaign_id):
-        return self._result(telegram_sender.check_draft, campaign_id)
-
-    def campaign_stop(self, campaign_id):
-        return self._result(telegram_sender.stop, campaign_id)
-
-    def campaign_mark_manual_sent(self, campaign_id, business_id):
-        return self._result(telegram_sender.mark_manual_sent, campaign_id, business_id)
-
-    def campaign_permission(self, campaign_id, business_id, status, source="", note=""):
-        return self._result(telegram_sender.set_contact_permission, campaign_id, business_id,
-                            status, source, note)
-
-    def campaign_manual_prepare(self, campaign_id, business_id, message):
-        return self._result(telegram_sender.manual_prepare, campaign_id, business_id, message)
-
-    def campaign_manual_not_sent(self, campaign_id, business_id):
-        return self._result(telegram_sender.mark_manual_not_sent, campaign_id, business_id)
+    def telegram_phone_links(self, business_id):
+        def build():
+            item = db.business(business_id)
+            if not item:
+                raise ValueError("Организация не найдена")
+            return build_telegram_phone_links(item.get("phones", []))
+        return self._result(build)
 
     def open_external(self, url):
         def run():
-            parsed = urlparse(url)
-            if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            if not isinstance(url, str) or len(url) > 2048:
+                raise ValueError("Ссылка пустая или слишком длинная")
+            parsed = urlparse(url.strip())
+            if (parsed.scheme.casefold() not in {"https", "http"} or not parsed.hostname
+                    or parsed.username or parsed.password):
                 raise ValueError("Можно открыть только обычную веб-ссылку")
-            webbrowser.open(url)
+            webbrowser.open(parsed.geturl(), new=2)
             return True
         return self._result(run)
 
@@ -347,22 +525,100 @@ def main():
         logger.exception("pywebview is unavailable")
         _message_box(f"Не удалось запустить интерфейс.\n\nПодробности: {DATA_DIR / 'logs' / 'app.log'}")
         return
+    geometry_store = None
     try:
         with single_instance():
-            db.init_db()
+            db.init_desktop_db()
             worker = LocalWorker()
             try:
                 bridge = Bridge()
-                page = (Path(__file__).parent / "desktop_ui" / "index.html").resolve().as_uri()
-                window = webview.create_window(f"{APP_NAME} · LEM", page, js_api=bridge, width=1440, height=900,
-                                               min_size=(1050, 700), background_color="#101c2a")
+                page_path = resource_path("app/desktop_ui/index.html")
+                icon_path = resource_path("app/assets/lem-icon.ico")
+                if not page_path.is_file():
+                    raise FileNotFoundError(f"Не найден интерфейс приложения: {page_path}")
+                if os.name == "nt":
+                    try:
+                        import ctypes
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                            "LeadEqualMoney.Desktop")
+                    except (AttributeError, OSError):
+                        logger.debug("Не удалось задать идентификатор приложения панели задач", exc_info=True)
+
+                geometry = _initial_window_geometry(DATA_DIR / "window.json")
+                geometry_store = _WindowGeometryStore(DATA_DIR / "window.json", geometry)
+                window_options = {key: geometry[key] for key in ("x", "y")}
+                window = webview.create_window(
+                    APP_NAME,
+                    page_path.resolve().as_uri(),
+                    js_api=bridge,
+                    width=int(geometry["width"] or 1366),
+                    height=int(geometry["height"] or 850),
+                    min_size=(1024, 700),
+                    background_color="#F8FAFC",
+                    **window_options,
+                )
                 bridge._window = window
                 profile = DATA_DIR / "webview"
                 profile.mkdir(parents=True, exist_ok=True)
+                maximized = False
+                icon_references = []
+
+                def apply_window_icon(*_args):
+                    if not icon_path.is_file():
+                        logger.warning("Файл значка окна не найден: %s", icon_path)
+                        return
+                    try:
+                        from System.Drawing import Icon
+                        icon = Icon(str(icon_path))
+                        window.native.Icon = icon
+                        icon_references.append(icon)
+                    except Exception:
+                        logger.exception("Не удалось установить значок заголовка окна")
+
+                def attach_navigation_guard(*_args):
+                    browser = getattr(getattr(window.native, "browser", None), "webview", None)
+                    if browser is None:
+                        logger.error("Не удалось установить защиту переходов WebView2")
+                        return
+
+                    def block_external_navigation(_sender, args):
+                        target = str(args.Uri)
+                        if _is_local_app_navigation(target, page_path):
+                            return
+                        args.Cancel = True
+                        parsed = urlparse(target)
+                        logger.info("Blocked in-window navigation: scheme=%s host=%s",
+                                    parsed.scheme, parsed.hostname or "")
+
+                    browser.NavigationStarting += block_external_navigation
+
+                def save_position(x, y):
+                    if geometry_store and not maximized:
+                        geometry_store.update(x=int(x), y=int(y))
+
+                def save_size(width, height):
+                    if geometry_store and not maximized:
+                        geometry_store.update(width=max(1024, int(width)),
+                                              height=max(700, int(height)))
+
+                def on_maximized(*_args):
+                    nonlocal maximized
+                    maximized = True
+
+                def on_restored(*_args):
+                    nonlocal maximized
+                    maximized = False
+
+                window.events.shown += apply_window_icon
+                window.events.before_show += attach_navigation_guard
+                window.events.moved += save_position
+                window.events.resized += save_size
+                window.events.maximized += on_maximized
+                window.events.restored += on_restored
+                window.events.closed += lambda *_args: geometry_store.flush() if geometry_store else None
 
                 def on_closing(*_args):
                     worker.stop.set()
-                    telegram_sender.request_shutdown()
 
                 window.events.closing += on_closing
                 # pywebview initializes the .NET/WebView2 backend before it starts
@@ -376,10 +632,11 @@ def main():
                              "Если он отсутствует, установите его с https://developer.microsoft.com/microsoft-edge/webview2/\n\n"
                              f"Подробности: {DATA_DIR / 'logs' / 'app.log'}")
             finally:
-                telegram_stopped = telegram_sender.shutdown(timeout=40)
+                if geometry_store:
+                    geometry_store.flush()
                 worker_stopped = worker.shutdown(timeout=50)
-                logger.info("Shutdown complete: telegram=%s worker=%s", telegram_stopped, worker_stopped)
-                if not (telegram_stopped and worker_stopped):
+                logger.info("Shutdown complete: worker=%s", worker_stopped)
+                if not worker_stopped:
                     logger.error("A background thread did not stop before timeout")
     except AlreadyRunningError as exc:
         logger.info("Second launch rejected: %s", exc)

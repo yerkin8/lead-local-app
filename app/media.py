@@ -17,6 +17,7 @@ from .config import MEDIA_DIR, MIN_FREE_BYTES
 from .driver_registry import quit_driver
 from .domain import org_id
 from .lead_parser import SearchStopped, localized_url, request_page
+from .yandex_urls import normalize_yandex_url
 
 MAX_ZIP_BYTES = 45 * 1024 * 1024
 
@@ -26,9 +27,9 @@ class MediaError(RuntimeError):
 
 
 def validate_org_url(url: str) -> str:
-    value = url.strip()
+    value = normalize_yandex_url(url)
     parsed = urlparse(value)
-    if parsed.scheme != "https" or parsed.hostname not in {"yandex.ru", "www.yandex.ru", "yandex.com", "www.yandex.com"}:
+    if parsed.scheme != "https" or parsed.hostname != "yandex.ru":
         raise MediaError("Нужна HTTPS-ссылка на карточку Яндекс.Карт")
     if re.fullmatch(r"/maps/org/[^/]+/\d+(?:/|/(?:gallery|prices|menu)/?)?", parsed.path):
         return value
@@ -253,7 +254,7 @@ def run_products_http(job: dict) -> dict:
     sections = ("menu", "prices") if section == "menu" else ("prices", "menu")
     products = []
     for section in sections:
-        _, page = request_page(session, f"https://yandex.com{card_path}{section}/")
+        _, page = request_page(session, f"https://yandex.ru{card_path}{section}/")
         try:
             name, products = products_from_state(page, org_id(url))
         except MediaError as exc:

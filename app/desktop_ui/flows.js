@@ -5,12 +5,14 @@ mediaJob = function (job) {
   const folder = job.result?.folder;
   const actions = (folder ? `<button class="btn" data-open-folder="${E(job.id)}">Открыть папку ↗</button>
     <button class="ghost" data-copy-folder="${E(job.id)}">Сохранить копию</button>
-    <span class="small muted">${E(job.result.files || 0)} файлов · ${E(folder)}</span>` : archives.map(name =>
+    <span class="small muted">${E(job.result.photos ?? job.result.files ?? 0)} фото · ${E(folder)}</span>` : archives.map(name =>
     `<button class="btn" data-open-archive="${E(job.id)}" data-archive-name="${E(name)}">${E(name)} ↗</button>
      <button class="ghost" data-save-archive="${E(job.id)}" data-archive-name="${E(name)}">Сохранить копию</button>`
   ).join(''));
   const retry = ['done', 'failed'].includes(job.status)
     ? `<button class="ghost" data-repeat-job="${E(job.id)}">Повторить парсинг</button>` : '';
+  const resume = job.kind === 'images' && job.status === 'failed'
+    ? `<button class="btn" data-resume-job="${E(job.id)}">Продолжить с сохранённого</button>` : '';
   const remove = !['running', 'queued'].includes(job.status)
     ? `<button class="danger" data-delete-media="${E(job.id)}">Удалить</button>` : '';
   return `<div class="row" data-activity-kind="media" data-activity-id="${E(job.id)}">
@@ -18,7 +20,7 @@ mediaJob = function (job) {
     <div class="small muted">${E(job.created_at?.slice(0, 16))} · ID ${E(job.organization_id)}</div></div>
     ${jobBadge(job)}</div>
     ${job.error ? `<div class="inline-note error-note">${E(job.error)}</div>` : ''}
-    <div class="toolbar" style="margin-top:10px">${actions}${retry}${remove}</div>
+    <div class="toolbar" style="margin-top:10px">${actions}${resume}${retry}${remove}</div>
   </div>`;
 };
 
@@ -32,90 +34,64 @@ settings = async function (node) {
   const panel = [...node.querySelectorAll('.panel')].find(x => x.textContent.includes('Данные и резервная копия'));
   panel?.querySelector('.toolbar')?.insertAdjacentHTML('beforeend',
     '<button class="btn" data-import-sqlite>Импорт старой SQLite</button><button class="ghost" data-open-logs>Открыть папку логов</button>');
-  const telegramPanel = [...node.querySelectorAll('.panel')].find(x => x.textContent.includes('Личный Telegram'));
-  telegramPanel?.insertAdjacentHTML('beforeend', `<div class="inline-note">
-    <strong>Если Telegram не выдаёт API ID</strong><p>Создавайте черновики без ключей: в рассылке можно скопировать текст, открыть публичный чат и после фактической отправки отметить результат в CRM.</p>
-    <p style="margin-top:8px">Для автоматической отправки нужны личные api_id и api_hash из <a href="https://my.telegram.org">my.telegram.org</a>. Если форма отвечает только «error», проверьте раздел API development tools на этом же аккаунте: у номера может быть только один API ID. Если ключей нет, отправьте скриншот ошибки в <a href="https://telegram.org/support">поддержку Telegram</a>. Бот не может первым написать незнакомому пользователю.</p>
-  </div>`);
-  const telegram = await call('telegram_state');
-  const phoneCheckStatus = telegram.configured
-    ? (telegram.session_exists
-      ? 'API ID настроен. Проверка номера доступна в карточке организации; согласие на рассылку для неё не требуется.'
-      : 'API ID настроен, но сначала войдите в Telegram по коду из этого раздела. Проверка не отправляет сообщений и не зависит от согласий.')
-    : `${telegram.configuration_error || 'API ID не указан. Введите собственные api_id и api_hash в форме выше.'} Проверка номера пока недоступна; сбоя приложения не будет.`;
-  telegramPanel?.querySelector('#telegram-config')?.insertAdjacentHTML('afterend',
-    `<div class="inline-note" role="status"><strong>Проверка номера</strong><p>${E(phoneCheckStatus)}</p>
-    <p>Проверка запускается отдельно из карточки организации, не требует согласия на рассылку и не отправляет сообщение.</p></div>`);
-  node.querySelector('.two-cols')?.insertAdjacentHTML('beforeend', `<section class="panel">
-    <h2>Безопасность отправки</h2>
-    <p>По умолчанию разрешено не более пяти сообщений в день с паузой 60 секунд. Telegram может ограничить аккаунт и при меньшей нагрузке.</p>
-    <form id="send-policy-form" class="form-grid" style="margin-top:14px">
-      <label class="field">Лимит в день (1–20)<input name="daily_limit" type="number" min="1" max="20" value="${E(telegram.daily_limit)}" required></label>
-      <label class="field">Пауза, секунд (30–3600)<input name="delay_seconds" type="number" min="30" max="3600" value="${E(telegram.delay_seconds)}" required></label>
-      <div class="wide"><button class="btn primary">Сохранить ограничения</button></div>
-    </form>
-    <div class="inline-note">Отправляйте только тем, кто дал согласие или первым написал вам. Отказ «СТОП» сохраняется навсегда в этом приложении.</div>
-  </section>`);
-  const blocked = await call('contact_permissions', 'blocked');
-  node.querySelector('.two-cols')?.insertAdjacentHTML('beforeend', `<section class="panel">
-    <h2>Список отказов</h2><p>Эти контакты автоматически исключаются из будущих кампаний. Запись нельзя снять из интерфейса.</p>
-    <div class="list" style="margin-top:12px">${blocked.length ? blocked.map(item => `<div class="row">
-      <strong>${E(item.peer)}</strong>${item.phone ? `<div class="small muted">${E(item.phone)}</div>` : ''}
-      <div class="small muted">${E(item.business_name || item.business_id || 'Контакт')} · ${E(item.note || 'Отказ от сообщений')} · ${E(item.updated_at)}</div>
-    </div>`).join('') : empty('Отказов пока нет')}</div>
-  </section>`);
+  const diagnostics = await safe(() => call('debug_html_enabled'));
+  panel?.insertAdjacentHTML('beforeend', `<label class="field" style="margin-top:14px"><span><input type="checkbox" id="debug-html" ${diagnostics ? 'checked' : ''}> Сохранять HTML карточки при ошибке парсинга</span></label><div class="inline-note">По умолчанию выключено. HTML может содержать телефоны и текст отзывов; файлы сохраняются только в локальной папке debug.</div>`);
+};
+
+const baseSearch = search;
+search = async function (node) {
+  await baseSearch(node);
+  node.querySelector('#search-form .form-grid')?.insertAdjacentHTML('beforeend',
+    '<label class="field">Отзывы на организацию<input name="review_limit" type="number" min="0" max="100" value="20"><small class="muted">0 отключает сбор; максимум 100</small></label>');
+};
+
+const baseCall = call;
+call = async function (method, ...args) {
+  if (method === 'search_start' && args[0] && args[0].review_limit === undefined) {
+    args[0].review_limit = Number(document.querySelector('#search-form [name="review_limit"]')?.value ?? 20);
+  }
+  return baseCall(method, ...args);
 };
 
 const baseDetail = detail;
 detail = async function (node) {
   await baseDetail(node);
   const business = await call('business', state.businessId);
+  const detail = business?.details || {};
+  const hours = business?.hours || [];
+  const features = business?.features || [];
+  const links = business?.links || [];
+  const reviews = business?.review_items || [];
+  const detailNode = node.querySelector('.detail-stack .panel .business-grid');
+  detailNode?.insertAdjacentHTML('afterend', `<section class="org-details-section" aria-label="Подробности карточки">
+    <div class="inline-note"><strong>Оценка:</strong> ${E(business.rating ?? '—')} · ${E(business.reviews ?? '—')} отзывов · <strong>Фото:</strong> ${E(detail.photo_count ?? 'нет данных')}</div>
+    ${detail.description ? `<p>${E(detail.description)}</p>` : ''}
+    ${detail.latitude != null && detail.longitude != null ? `<p class="small muted">Координаты: ${E(detail.latitude)}, ${E(detail.longitude)}</p>` : ''}
+    ${detail.categories?.length ? `<p class="small">Категории: ${detail.categories.map(E).join(' · ')}</p>` : ''}
+    ${hours.length ? `<h3>Часы работы</h3><div class="org-details-list">${hours.map(x => `<div><strong>${E(x.weekday)}</strong><span>${x.is_closed ? 'Закрыто' : `${E(x.opens || '—')}–${E(x.closes || '—')}`}</span></div>`).join('')}</div>` : ''}
+    ${features.length ? `<h3>Особенности</h3><div class="org-details-list">${features.map(x => `<div><strong>${E(x.name)}</strong><span>${E(x.value || '—')}</span></div>`).join('')}</div>` : ''}
+    ${links.length ? `<h3>Ссылки</h3><div class="org-details-list">${links.map(x => `<div><strong>${E(x.type)}</strong><a href="${E(x.url)}" target="_blank" rel="noopener noreferrer">${E(x.label || x.url)}</a></div>`).join('')}</div>` : ''}
+    <h3>Отзывы · сохранено ${reviews.length}</h3>
+    <p class="small muted">${detail.reviews_complete ? 'Запрошенный лимит достигнут или карточка пройдена.' : 'Сбор частичный и может продолжиться при повторном обновлении карточки.'}</p>
+    ${reviews.length ? `<div class="org-review-list">${reviews.map(x => `<article><div class="small muted">${E(x.review_date || 'Дата не указана')} · ${E(x.rating ?? 'без оценки')}</div><p>${E(x.text)}</p>${x.company_response ? `<div class="inline-note"><strong>Ответ организации:</strong> ${E(x.company_response)}</div>` : ''}</article>`).join('')}</div>` : '<p class="small muted">Подробные отзывы пока не сохранены.</p>'}
+  </section>`);
   if (business.phones?.length) {
     node.querySelector('.detail-stack .panel')?.insertAdjacentHTML('beforeend',
-      `<div class="inline-note"><div class="panel-head"><div><strong>Проверить Telegram по телефону</strong>
-      <p>При проверке номер временно передаётся Telegram как контакт, затем удаляется. Сообщение не отправляется; согласие на рассылку не требуется.</p></div></div>
-      <div class="toolbar"><select id="phone-check-select" aria-label="\u041d\u043e\u043c\u0435\u0440 \u0434\u043b\u044f \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438">${business.phones.map(phone =>
-        `<option value="${E(phone)}">${E(phone)}</option>`).join('')}</select>
-      <button class="btn" data-check-phone>Проверить номер</button></div>
-      ${business.telegram ? `<div class="small" style="margin-top:8px">Последняя проверка: ${E(business.telegram.checked_at)} · ID ${E(business.telegram.telegram_id)}</div>` : ''}
-      </div>`);
-  }
-  node.querySelector('#crm-form')?.insertAdjacentHTML('beforeend',
-    `<div class="inline-note ${business.do_not_contact ? 'error-note' : ''}">
-      <label><input id="do-not-contact" type="checkbox" ${business.do_not_contact ? 'checked' : ''}>
-      Не писать этой организации</label>
-      <input id="suppression-reason" aria-label="\u041f\u0440\u0438\u0447\u0438\u043d\u0430 \u043e\u0442\u043a\u0430\u0437\u0430 \u0438\u043b\u0438 \u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u043a\u0438" placeholder="Причина (необязательно)"
-        value="${E(business.suppression_reason)}" style="width:100%;margin-top:8px">
-      <button class="btn" type="button" data-save-suppression style="margin-top:8px">Сохранить правило</button>
-    </div>`);
-};
-
-const baseCampaigns = campaigns;
-campaigns = async function (node) {
-  await baseCampaigns(node);
-  if (state.campaignId) {
-    const campaign = await call('campaign_get', state.campaignId);
-    if (campaign.error) node.querySelector('.panel-head')?.insertAdjacentHTML('afterend',
-      `<div class="inline-note error-note">${E(campaign.error)}</div>`);
-    if (campaign.status === 'draft') {
-      node.querySelector('.panel-head .toolbar')?.insertAdjacentHTML('afterbegin',
-        '<button class="btn" data-check-campaign>Проверить адресатов</button>');
-    }
+      `<section class="inline-note" aria-labelledby="telegram-links-title"><div class="panel-head"><div><strong id="telegram-links-title">Проверить ТГ</strong>
+      <p>Сформировать ручные ссылки по телефонам карточки. Приложение не обращается к Telegram и не проверяет наличие аккаунта.</p></div></div>
+      <div class="toolbar"><button class="btn" data-show-telegram-links>Сформировать ссылки</button><button class="ghost" data-copy-all-telegram-links hidden>Копировать все</button></div>
+      <p class="small muted">Если номер не открывается в Telegram, это может означать и скрытую видимость номера у владельца, а не отсутствие аккаунта.</p>
+      <div class="list" data-telegram-link-list aria-live="polite" style="margin-top:10px"></div></section>`);
   }
 };
 
-const baseScripts = scripts;
-scripts = async function (node) {
-  await baseScripts(node);
-  if (!state.scriptBusiness) return;
-  const business = await call('business', state.scriptBusiness);
-  const preview = await call('template_render', state.script, state.scriptBusiness);
-  node.querySelector('.two-cols')?.insertAdjacentHTML('beforeend',
-    `<section class="panel" style="grid-column:1 / -1"><div class="panel-head">
-      <div><h2>Текст для ${E(business.name)}</h2><p>Проверьте факты и заполните поля в квадратных скобках.</p></div>
-      <button class="btn" data-copy-script>Копировать</button></div>
-      <textarea id="script-preview" aria-label="\u0422\u0435\u043a\u0441\u0442 \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043b\u0435\u043d\u043d\u043e\u0433\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f" readonly>${E(preview)}</textarea></section>`);
-};
+document.addEventListener('change', event => {
+  if (event.target.id !== 'debug-html') return;
+  safe(async () => {
+    await call('set_debug_html_enabled', event.target.checked);
+    toast(event.target.checked ? 'Диагностическое сохранение включено' : 'Диагностическое сохранение выключено');
+  });
+});
 
 const baseBusinesses = businesses;
 businesses = async function (node) {
@@ -135,7 +111,7 @@ businesses = async function (node) {
       const rows = await safe(() => call('businesses', {q: state.businessQuery, limit: 50}));
       if (!rows) return;
       state.businessOffset = rows.length;
-      list.innerHTML = rows.length ? rows.map(b => businessRow(b, true)).join('')
+      list.innerHTML = rows.length ? rows.map(b => businessRow(b)).join('')
         : empty('Ничего не найдено');
       node.querySelector('[data-load-businesses]').hidden = rows.length < 50;
     }, 250);
@@ -181,10 +157,28 @@ media = async function (node) {
 document.addEventListener('input', event => {
   if (event.target.id === 'media-url') state.mediaUrl = event.target.value;
   if (event.target.id === 'media-count') state.mediaCount = Number(event.target.value);
+  if (event.target.id === 'media-total-count') state.mediaTotalCount = Number(event.target.value);
 });
 document.addEventListener('change', event => {
-  if (event.target.hasAttribute('data-section')) {
-    state.mediaSections = [...document.querySelectorAll('[data-section]:checked')].map(x => x.dataset.section);
+  if (event.target.id === 'media-business') {
+    state.mediaSectionsFor = null;
+    state.mediaAvailableSections = [];
+  }
+  if (event.target.hasAttribute('data-section-all')) {
+    state.mediaSections = event.target.checked ? ['__all__'] : [];
+    document.querySelectorAll('[data-section]').forEach(input => { input.checked = event.target.checked; });
+  } else if (event.target.hasAttribute('data-section')) {
+    const available = state.mediaAvailableSections || [];
+    const selected = (state.mediaSections || []).includes('__all__')
+      ? [...available] : [...(state.mediaSections || [])];
+    const label = event.target.dataset.section;
+    const index = selected.indexOf(label);
+    if (event.target.checked && index < 0) selected.push(label);
+    if (!event.target.checked && index >= 0) selected.splice(index, 1);
+    state.mediaSections = selected.length === available.length && available.length
+      ? ['__all__'] : selected;
+    const all = document.querySelector('[data-section-all]');
+    if (all) all.checked = state.mediaSections.includes('__all__');
   }
 });
 
@@ -199,7 +193,13 @@ document.addEventListener('click', event => {
       if (!old) throw Error('Задание не найдено');
       const payload = old.business_id
         ? {business_id: old.business_id} : {url: old.params.url};
-      if (old.kind === 'images') payload.sections = old.params.sections;
+      if (old.kind === 'images') {
+        if (old.params.selection) {
+          payload.selection = old.params.selection;
+          payload.per_section_limit = old.params.per_section_limit;
+          payload.organization_limit = old.params.organization_limit;
+        } else payload.sections = old.params.sections;
+      }
       payload.repeat = true;
       const result = await call('media_start', old.kind, payload);
       toast(result.created ? 'Повторное задание создано' : 'Задание уже выполняется');
@@ -210,26 +210,6 @@ document.addEventListener('click', event => {
     safe(async () => {
       const target = await call('media_save', button.dataset.saveArchive, button.dataset.archiveName);
       if (target) toast(`Копия сохранена: ${target}`);
-    });
-  } else if (button.dataset.action === 'script-for-business') {
-    event.stopImmediatePropagation();
-    state.scriptBusiness = state.businessId;
-    setView('scripts');
-  } else if (button.dataset.action === 'campaign-start') {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      const draft = await call('campaign_get', state.campaignId);
-      if (!confirm(`Отправить ${draft.recipients.length} проверенных сообщений с вашего личного Telegram?`)) return;
-      await call('campaign_start', state.campaignId);
-      toast('Рассылка запущена'); render();
-    });
-  } else if (button.hasAttribute('data-copy-script')) {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      const field = document.querySelector('#script-preview');
-      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(field.value);
-      else { field.select(); document.execCommand('copy'); }
-      toast('Текст скопирован');
     });
   } else if (button.hasAttribute('data-load-businesses')) {
     event.stopImmediatePropagation();
@@ -258,30 +238,44 @@ document.addEventListener('click', event => {
   } else if (button.hasAttribute('data-open-logs')) {
     event.stopImmediatePropagation();
     safe(() => call('open_logs'));
-  } else if (button.hasAttribute('data-check-campaign')) {
+  } else if (button.hasAttribute('data-show-telegram-links')) {
     event.stopImmediatePropagation();
     safe(async () => {
-      const result = await call('campaign_check', state.campaignId);
-      const ready = result.recipients.filter(item => item.status === 'ready').length;
-      toast(`Проверено: ${ready} из ${result.recipients.length}`);
-      render();
+      const rows = await call('telegram_phone_links', state.businessId);
+      const list = document.querySelector('[data-telegram-link-list]');
+      if (!list) return;
+      const valid = rows.filter(row => row.ok && row.url);
+      list.innerHTML = rows.map((row, index) => row.ok
+        ? `<div class="row row-head"><div><strong>${E(row.number)}</strong><div class="small muted">${E(row.url)}</div></div><div class="toolbar"><button class="btn" data-phone-open="${index}">Открыть</button><button class="ghost" data-phone-copy="${index}">Копировать</button></div></div>`
+        : `<div class="row"><strong>${E(row.number)}</strong><div class="small muted">Не удалось сформировать ссылку: ${E(row.reason)}</div></div>`).join('') || empty('Телефоны не найдены');
+      list.dataset.links = JSON.stringify(rows);
+      const copyAll = document.querySelector('[data-copy-all-telegram-links]');
+      if (copyAll) copyAll.hidden = valid.length < 1;
+      toast(valid.length ? `Ссылок сформировано: ${valid.length}` : 'Подходящие мобильные номера не найдены');
     });
-  } else if (button.hasAttribute('data-save-suppression')) {
+  } else if (button.hasAttribute('data-phone-open')) {
     event.stopImmediatePropagation();
     safe(async () => {
-      await call('business_suppress', state.businessId,
-        document.querySelector('#do-not-contact').checked,
-        document.querySelector('#suppression-reason').value);
-      toast('Правило контакта сохранено'); render();
+      const rows = JSON.parse(document.querySelector('[data-telegram-link-list]')?.dataset.links || '[]');
+      const item = rows[Number(button.dataset.phoneOpen)];
+      if (!item?.url) throw Error('Ссылка не найдена');
+      await call('open_external', item.url);
     });
-  } else if (button.hasAttribute('data-check-phone')) {
+  } else if (button.hasAttribute('data-phone-copy') || button.hasAttribute('data-copy-all-telegram-links')) {
     event.stopImmediatePropagation();
     safe(async () => {
-      toast('Проверяю номер через Telegram…');
-      const result = await call('telegram_check_phone', state.businessId,
-        document.querySelector('#phone-check-select').value);
-      toast(result.found ? `Telegram найден: ID ${result.telegram_id}` : 'Telegram для этого номера не найден');
-      render();
+      const rows = JSON.parse(document.querySelector('[data-telegram-link-list]')?.dataset.links || '[]');
+      const text = button.hasAttribute('data-copy-all-telegram-links')
+        ? rows.filter(item => item.ok && item.url).map(item => item.url).join('\n')
+        : rows[Number(button.dataset.phoneCopy)]?.url;
+      if (!text) throw Error('Ссылка не найдена');
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else {
+        const field = document.createElement('textarea'); field.value = text;
+        field.style.position = 'fixed'; field.style.opacity = '0'; document.body.append(field);
+        field.select(); document.execCommand('copy'); field.remove();
+      }
+      toast(button.hasAttribute('data-copy-all-telegram-links') ? 'Ссылки скопированы' : 'Ссылка скопирована');
     });
   }
 }, true);
@@ -310,6 +304,11 @@ media = async function (node) {
   let selected = rows.find(row => row.id === state.mediaBusiness);
   if (!selected && state.mediaBusiness) selected = await call('business', state.mediaBusiness);
   const choices = selected && !rows.some(row => row.id === selected.id) ? [selected, ...rows] : rows;
+  const sourceKey = state.mediaManual ? `url:${String(state.mediaUrl || '').trim()}` : `business:${state.mediaBusiness || ''}`;
+  const discovered = state.mediaSectionsFor === sourceKey;
+  const availableSections = discovered ? (state.mediaAvailableSections || []) : [];
+  const selectedSections = discovered ? (state.mediaSections || ['__all__']) : [];
+  const allSectionsSelected = selectedSections.includes('__all__');
   node.innerHTML = `<section class="panel task-panel">
     <div class="panel-head"><div><span class="section-kicker">НОВОЕ ЗАДАНИЕ</span><h2>Источник медиа</h2>
       <p>${state.mediaManual ? 'Вставьте ссылку на карточку Яндекс.Карт' : 'Найдите организацию; ссылка будет взята из базы'}</p></div>
@@ -322,12 +321,18 @@ media = async function (node) {
       ${selected ? `<div class="inline-note">Выбрана: <strong>${E(selected.name)}</strong> · ${E(selected.map_url)}</div>` : ''}`}
     <div class="tabs"><button class="tab ${state.mediaKind === 'images' ? 'active' : ''}" data-media-kind="images">Галерея</button>
       <button class="tab ${state.mediaKind === 'products' ? 'active' : ''}" data-media-kind="products">Товары</button></div>
-    ${state.mediaKind === 'images' ? `<div class="checkboxes"><label><input type="checkbox" data-section="Внутри" ${!state.mediaSections || state.mediaSections.includes('Внутри') ? 'checked' : ''}> Внутри</label>
-      <label><input type="checkbox" data-section="Еда" ${state.mediaSections?.includes('Еда') ? 'checked' : ''}> Еда</label>
-      <label><input type="checkbox" data-section="Меню" ${state.mediaSections?.includes('Меню') ? 'checked' : ''}> Меню</label>
-      <label class="field">Фото на секцию<input id="media-count" type="number" min="1" max="50" value="${E(state.mediaCount || 10)}"></label></div>` :
+    ${state.mediaKind === 'images' ? `<section class="panel" aria-label="Разделы галереи"><div class="toolbar">
+      <button class="btn" type="button" data-discover-sections>Найти разделы</button>
+      <span class="small muted">Список загружается только после нажатия.</span></div>
+      ${discovered ? (availableSections.length ? `<p class="small muted">Найдено разделов: ${availableSections.length}. Видео исключено.</p>
+        <label><input type="checkbox" data-section-all ${allSectionsSelected ? 'checked' : ''}> Все разделы</label>
+        <div class="checkboxes">${availableSections.map(name => `<label><input type="checkbox" data-section="${E(name)}" ${(allSectionsSelected || selectedSections.includes(name)) ? 'checked' : ''}> ${E(name)}</label>`).join('')}</div>` :
+        `<div class="inline-note">${E(state.mediaSectionMessage || 'Разделы не найдены. При запуске будет использована общая галерея.')}</div>`) :
+        '<div class="inline-note">Сначала найдите разделы, чтобы выбрать все или отдельные категории.</div>'}
+      <div class="form-grid" style="margin-top:12px"><label class="field">Фото на раздел<input id="media-count" type="number" min="1" max="50" value="${E(state.mediaCount || 10)}"></label>
+      <label class="field">Фото на организацию<input id="media-total-count" type="number" min="1" max="200" value="${E(state.mediaTotalCount || 50)}"></label></div></section>` :
       '<p>Собрать названия товаров, цены и доступные фотографии в отдельную папку.</p>'}
-    <div class="task-actions"><button class="btn primary" data-action="start-media">Запустить ${state.mediaKind === 'images' ? 'галерею' : 'товары'}</button>
+    <div class="task-actions"><button class="btn primary" data-action="start-media" ${state.mediaKind === 'images' && !discovered ? 'disabled' : ''}>Запустить ${state.mediaKind === 'images' ? 'галерею' : 'товары'}</button>
       <span class="small muted">Результат: папка с именем организации и города</span></div>
   </section><section class="panel"><div class="panel-head"><div><span class="section-kicker">РЕЗУЛЬТАТЫ</span><h2>История медиа</h2></div><span class="result-count">${jobs.length} заданий</span></div>
     <div class="list">${jobs.length ? jobs.map(mediaJob).join('') : empty('Заданий пока нет')}</div></section>`;
@@ -350,152 +355,41 @@ media = async function (node) {
   }
 };
 
-const campaignBaseWithChecks = campaigns;
-campaigns = async function (node) {
-  await campaignBaseWithChecks(node);
-  const telegram = await call('telegram_state');
-  state.telegramConfigured = Boolean(telegram.configured);
-  if (state.campaignId) {
-    const draft = await call('campaign_get', state.campaignId);
-    if ((!telegram.configured || draft.recipients.some(row => row.status === 'sent')) && draft.status === 'draft') {
-      node.querySelector('[data-action="campaign-start"]')?.remove();
-    }
-    if (!telegram.configured && draft.status === 'draft') {
-      node.querySelector('[data-check-campaign]')?.remove();
-    }
-    if (draft.status === 'draft') {
-      node.querySelector('.panel-head')?.insertAdjacentHTML('afterend',
-        `<div class="inline-note">${telegram.configured ? 'Автоматическая отправка доступна после проверки адресатов. ' : 'API Telegram пока не настроен. '}
-        Для ручной отправки скопируйте текст, откройте чат в Telegram и подтвердите отправку здесь.</div>`);
-      node.querySelectorAll('[data-recipient-message]').forEach(field => {
-        const id = field.dataset.recipientMessage;
-        const recipient = draft.recipients.find(row => row.business_id === id);
-        const row = field.closest('.row');
-        if (!recipient || !row) return;
-        const heading = row.querySelector('.row-head strong');
-        if (heading) heading.textContent = `${recipient.business_name || recipient.business_id} · ${recipient.peer.startsWith('phone:') ? 'проверенный номер' : '@' + recipient.peer}`;
-        if (recipient.status === 'sent') {
-          field.readOnly = true;
-          row.querySelector('[data-save-recipient]')?.remove();
-        }
-        if (recipient.status === 'prepared') {
-          field.readOnly = true;
-          row.querySelector('[data-save-recipient]')?.remove();
-        }
-        const statusText = recipient.permission_status === 'allowed'
-          ? `Согласие: ${recipient.permission_source === 'inbound_message' ? 'человек написал первым' : 'получено явно'} · ${recipient.permission_note}`
-          : recipient.permission_status === 'blocked' ? 'Контакт отказался — будущая отправка запрещена.'
-          : 'Сначала подтвердите согласие или входящее сообщение.';
-        row.insertAdjacentHTML('beforeend', `<div class="permission-box ${recipient.permission_status === 'blocked' ? 'error-note' : ''}">
-          <strong>${E(statusText)}</strong>${recipient.permission_status === 'allowed' || recipient.permission_status === 'blocked' ? '' : `
-          <div class="form-grid" style="margin-top:10px">
-            <label class="field">Основание<select data-permission-source="${E(id)}">
-              <option value="explicit_consent">Человек явно согласился</option>
-              <option value="inbound_message">Человек написал первым</option>
-            </select></label>
-            <label class="field">Где/когда получено согласие<input data-permission-note="${E(id)}" placeholder="Например: заявка 16.10.2026"></label>
-          </div><button class="btn" data-permission-allow="${E(id)}" style="margin-top:9px">Сохранить согласие</button>`}
-          <div class="toolbar" style="margin-top:9px"><button class="danger" data-permission-block="${E(id)}" ${recipient.permission_status === 'blocked' ? 'disabled' : ''}>${recipient.permission_status === 'blocked' ? 'Отказ сохранён' : 'Больше не писать'}</button></div>
-        </div>`);
-        if (recipient.permission_status === 'allowed' && !recipient.peer.startsWith('phone:') && recipient.status === 'prepared') {
-          row.insertAdjacentHTML('beforeend', `<div class="toolbar manual-actions">
-            <button class="btn" data-manual-sent="${E(id)}">Я отправил сообщение</button>
-            <button class="ghost" data-manual-not-sent="${E(id)}">Я не отправлял</button>
-          </div>`);
-        } else if (recipient.permission_status === 'allowed' && !recipient.peer.startsWith('phone:') && recipient.status !== 'sent') {
-          row.insertAdjacentHTML('beforeend', `<div class="toolbar manual-actions">
-            <button class="btn" data-manual-open="${E(id)}">Скопировать текст и открыть чат</button>
-          </div>`);
-        }
-      });
-    } else {
-      node.querySelectorAll('[data-recipient-message]').forEach(field => {
-        const id = field.dataset.recipientMessage;
-        const recipient = draft.recipients.find(row => row.business_id === id);
-        const row = field.closest('.row');
-        if (!recipient || !row || recipient.permission_status === 'blocked') return;
-        row.insertAdjacentHTML('beforeend', `<div class="toolbar permission-box">
-          <span>Если адресат попросил больше не писать, сохраните отказ здесь.</span>
-          <button class="danger" data-permission-block="${E(id)}">Больше не писать</button>
-        </div>`);
-      });
-    }
-    return;
-  }
-  const form = node.querySelector('#campaign-form');
-  if (!form) return;
-  const options = await call('business_filter_options');
-  const filters = state.campaignFilters || {};
-  const filterSelect = (name, label) => `<label class="field">${label}<select data-campaign-filter="${name}">
-    <option value="">Все</option>${(options[name] || []).filter(Boolean).map(value =>
-      `<option value="${E(value)}" ${filters[name] === value ? 'selected' : ''}>${E(name === 'status' ? state.config.statuses[value] || value : value)}</option>`).join('')}</select></label>`;
-  form.querySelector('.toolbar')?.insertAdjacentHTML('beforebegin', `<div class="recipient-picker">
-    <div class="panel-head"><div><span class="section-kicker">ШАГ 1 · АДРЕСАТЫ</span><h2>Выберите организации</h2>
-      <p>Поиск по базе, фильтры и выбор находятся здесь же.</p></div><strong id="campaign-selected">${state.selected.size} выбрано</strong></div>
-    <div class="form-grid"><label class="field wide">Название или адрес<input id="campaign-query" value="${E(filters.q || '')}" placeholder="Поиск по базе"></label>
-      ${filterSelect('city', 'Город')}${filterSelect('niche', 'Ниша')}${filterSelect('status', 'Статус')}</div>
-    <div class="toolbar picker-toolbar"><button type="button" class="ghost" data-campaign-select-page>Выбрать доступных в списке</button>
-      <button type="button" class="ghost" data-campaign-clear>Снять выбор</button>
-      <span class="small muted">Для автоматической отправки нужен Telegram-адрес или проверенный номер.</span></div>
-    <div class="list" id="campaign-business-list"></div><button type="button" class="btn" data-campaign-more hidden>Показать ещё</button>
-  </div>`);
-  const picker = form.querySelector('.recipient-picker');
-  if (picker) form.prepend(picker);
-  form.querySelector(':scope > .form-grid')?.insertAdjacentHTML('beforebegin',
-    '<span class="section-kicker">ШАГ 2 · СООБЩЕНИЕ</span>');
-  const helper = form.closest('.panel')?.querySelector('.panel-head p');
-  if (helper) helper.textContent = 'Выберите адресатов ниже, затем скрипт. Черновик можно проверить перед отправкой.';
-  form.querySelector(':scope > p')?.remove();
-  await loadCampaignBusinesses(false);
-};
-
-async function loadCampaignBusinesses(more) {
-  const list = document.querySelector('#campaign-business-list');
-  if (!list) return;
-  const filters = state.campaignFilters || {};
-  const offset = more ? (state.campaignOffset || 0) : 0;
-  const rows = await call('businesses', {...filters, limit: 50, offset});
-  if (!more) list.innerHTML = '';
-  list.insertAdjacentHTML('beforeend', rows.map(row => {
-    const hasPublic = row.socials?.some(x => /https:\/\/(t\.me|telegram\.me)\//i.test(x.url || ''));
-    const eligible = hasPublic || (state.telegramConfigured && Boolean(row.telegram));
-    return `<label class="recipient-row"><input type="checkbox" data-select="${E(row.id)}" ${state.selected.has(row.id) ? 'checked' : ''} ${eligible ? '' : 'disabled'}>
-      <span><strong>${E(row.name)}</strong><small>${E(row.city || '')} · ${E(row.address || '')}</small></span>
-      <span class="chip ${eligible ? 'green' : 'warn'}">${eligible ? hasPublic ? 'Telegram' : 'Номер проверен' : row.telegram ? 'Нужен API' : 'Нет адресата'}</span>
-      ${eligible ? '' : `<button type="button" class="ghost" data-open="${E(row.id)}">Карточка</button>`}</label>`;
-  }).join('') || (!more ? empty('Организации не найдены') : ''));
-  state.campaignOffset = offset + rows.length;
-  state.campaignPage = rows;
-  const button = document.querySelector('[data-campaign-more]');
-  if (button) button.hidden = rows.length < 50;
-  updateCampaignSelected();
-}
-
-function updateCampaignSelected() {
-  const count = document.querySelector('#campaign-selected');
-  if (count) count.textContent = `${state.selected.size} выбрано`;
-}
-
-document.addEventListener('change', event => {
-  if (event.target.hasAttribute('data-select')) updateCampaignSelected();
-  if (!event.target.hasAttribute('data-campaign-filter')) return;
-  state.campaignFilters = {...(state.campaignFilters || {}), [event.target.dataset.campaignFilter]: event.target.value};
-  safe(() => loadCampaignBusinesses(false));
-});
-document.addEventListener('input', event => {
-  if (event.target.id !== 'campaign-query') return;
-  state.campaignFilters = {...(state.campaignFilters || {}), q: event.target.value.trim()};
-  clearTimeout(state.campaignTimer);
-  state.campaignTimer = setTimeout(() => safe(() => loadCampaignBusinesses(false)), 250);
-});
+// Media actions are intentionally separate from Telegram contact links.
 document.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button) return;
-  if (button.dataset.mediaSource) {
+  if (button.dataset.resumeJob) {
+    event.stopImmediatePropagation();
+    safe(async () => {
+      await call('media_resume', button.dataset.resumeJob);
+      activityPoller.refresh();
+      toast('Задание продолжено, сохранённые фотографии учтены');
+      render();
+    });
+  } else if (button.dataset.mediaSource) {
     event.stopImmediatePropagation();
     state.mediaManual = button.dataset.mediaSource === 'manual';
     if (state.mediaManual) state.mediaBusiness = null;
+    state.mediaSectionsFor = null;
+    state.mediaAvailableSections = [];
     render();
+  } else if (button.hasAttribute('data-discover-sections')) {
+    event.stopImmediatePropagation();
+    safe(async () => {
+      const payload = state.mediaManual
+        ? {url: document.querySelector('#media-url')?.value.trim()}
+        : {business_id: document.querySelector('#media-business')?.value};
+      const result = await call('media_discover_sections', payload);
+      state.mediaAvailableSections = result.sections || [];
+      state.mediaSectionsFor = state.mediaManual
+        ? `url:${String(state.mediaUrl || '').trim()}` : `business:${payload.business_id || ''}`;
+      state.mediaSections = ['__all__'];
+      state.mediaSectionMessage = result.fallback
+        ? 'Разделы не найдены. При запуске будет использована общая галерея.' : '';
+      toast(result.fallback ? 'Разделы не найдены; будет использована общая галерея' : `Найдено разделов: ${result.sections.length}`);
+      render();
+    });
   } else if (button.dataset.action === 'start-media') {
     event.stopImmediatePropagation();
     safe(async () => {
@@ -503,8 +397,16 @@ document.addEventListener('click', event => {
         ? {url: document.querySelector('#media-url')?.value.trim()}
         : {business_id: document.querySelector('#media-business')?.value};
       if (state.mediaKind === 'images') {
-        const count = Number(document.querySelector('#media-count')?.value);
-        payload.sections = Object.fromEntries([...document.querySelectorAll('[data-section]:checked')].map(x => [x.dataset.section, count]));
+        const expectedSource = state.mediaManual
+          ? `url:${String(state.mediaUrl || '').trim()}` : `business:${payload.business_id || ''}`;
+        if (state.mediaSectionsFor !== expectedSource) {
+          throw Error('Сначала нажмите «Найти разделы» для выбранной организации');
+        }
+        const selection = state.mediaSections || ['__all__'];
+        payload.selection = {mode: selection.includes('__all__') ? 'all' : 'selected',
+          names: selection.filter(name => name !== '__all__')};
+        payload.per_section_limit = Number(document.querySelector('#media-count')?.value);
+        payload.organization_limit = Number(document.querySelector('#media-total-count')?.value);
       }
       const job = await call('media_start', state.mediaKind, payload);
       toast(job.created ? 'Задание создано' : job.status === 'done' ? 'Результат уже готов. Используйте «Повторить парсинг».' : 'Задание уже выполняется');
@@ -513,99 +415,12 @@ document.addEventListener('click', event => {
   } else if (button.dataset.openFolder || button.dataset.copyFolder) {
     event.stopImmediatePropagation();
     safe(async () => {
-      const path = button.dataset.openFolder ? await call('media_open', button.dataset.openFolder, '')
+      const path = button.dataset.openFolder
+        ? await call('media_open', button.dataset.openFolder, '')
         : await call('media_save', button.dataset.copyFolder, '');
       if (path && button.dataset.copyFolder) toast(`Папка сохранена: ${path}`);
     });
-  } else if (button.hasAttribute('data-campaign-more')) {
-    event.stopImmediatePropagation(); safe(() => loadCampaignBusinesses(true));
-  } else if (button.hasAttribute('data-campaign-select-page')) {
-    event.stopImmediatePropagation();
-    document.querySelectorAll('#campaign-business-list input[data-select]:not(:disabled)').forEach(input => {
-      input.checked = true; state.selected.add(input.dataset.select);
-    });
-    updateCampaignSelected();
-  } else if (button.hasAttribute('data-campaign-clear')) {
-    event.stopImmediatePropagation(); state.selected.clear();
-    document.querySelectorAll('#campaign-business-list input[data-select]').forEach(input => input.checked = false);
-    updateCampaignSelected();
-  } else if (button.dataset.manualOpen) {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      const field = document.querySelector(`[data-recipient-message="${CSS.escape(button.dataset.manualOpen)}"]`);
-      const value = field?.value || '';
-      if (!value.trim() || /\[[^\]]+\]/.test(value)) throw Error('Заполните поля в квадратных скобках');
-      const prepared = await call('campaign_manual_prepare', state.campaignId, button.dataset.manualOpen, value);
-      try {
-        if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(prepared.message);
-        else { field.select(); document.execCommand('copy'); }
-      } catch (_) { field.select(); document.execCommand('copy'); }
-      try {
-        await call('open_external', prepared.url);
-        toast('Текст скопирован. Вставьте и отправьте его в Telegram.');
-      } finally { render(); }
-    });
-  } else if (button.dataset.permissionAllow) {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      const id = button.dataset.permissionAllow;
-      const source = document.querySelector(`[data-permission-source="${CSS.escape(id)}"]`)?.value || '';
-      const note = document.querySelector(`[data-permission-note="${CSS.escape(id)}"]`)?.value || '';
-      if (note.trim().length < 3) throw Error('Укажите, где или когда получено согласие');
-      await call('campaign_permission', state.campaignId, id, 'allowed', source, note);
-      toast('Согласие сохранено'); render();
-    });
-  } else if (button.dataset.permissionBlock) {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      if (!confirm('Сохранить отказ и исключить этот контакт из будущих кампаний?')) return;
-      await call('campaign_permission', state.campaignId, button.dataset.permissionBlock,
-        'blocked', 'opt_out', 'Отказ/просьба больше не писать');
-      toast('Отказ сохранён. Контакт исключён из рассылок.'); render();
-    });
-  } else if (button.dataset.manualSent) {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      if (!confirm('Вы уже отправили это сообщение в Telegram вручную?')) return;
-      await call('campaign_mark_manual_sent', state.campaignId, button.dataset.manualSent);
-      toast('Отправка отмечена в CRM'); render();
-    });
-  } else if (button.dataset.manualNotSent) {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      if (!confirm('Подтвердите, что сообщение не было отправлено. Подготовленная попытка останется в дневном журнале.')) return;
-      await call('campaign_manual_not_sent', state.campaignId, button.dataset.manualNotSent);
-      toast('Отмечено: сообщение не отправлялось. Дневной лимит и пауза учитывают подготовленную попытку.'); render();
-    });
   }
-}, true);
-
-document.addEventListener('submit', event => {
-  if (event.target.id === 'telegram-config') {
-    event.preventDefault(); event.stopImmediatePropagation();
-    safe(async () => {
-      const form = event.target;
-      const values = new FormData(form);
-      const apiId = String(values.get('api_id') || '').trim();
-      const apiHash = String(values.get('api_hash') || '').trim();
-      const phone = String(values.get('phone') || '').trim();
-      if (!/^\d+$/.test(apiId) || Number(apiId) <= 0) throw Error('API ID должен быть положительным целым числом.');
-      if (!/^[a-fA-F0-9]{32}$/.test(apiHash)) throw Error('API hash должен содержать 32 шестнадцатеричных символа.');
-      if (!/^\+\d{10,15}$/.test(phone)) throw Error('Введите номер в международном формате, например +79990000000.');
-      await call('telegram_configure', Number(apiId), apiHash, phone);
-      toast('Настройки Telegram сохранены'); render();
-    });
-    return;
-  }
-  if (event.target.id !== 'send-policy-form') return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  safe(async () => {
-    const values = new FormData(event.target);
-    const policy = await call('telegram_policy_save', Number(values.get('daily_limit')),
-      Number(values.get('delay_seconds')));
-    toast(`Ограничения сохранены: ${policy.daily_limit} в день, пауза ${policy.delay_seconds} секунд`);
-  });
 }, true);
 
 function showFirstRunWizard() {
@@ -616,59 +431,253 @@ function showFirstRunWizard() {
   dialog.innerHTML = `<section class="setup-card">
     <span class="section-kicker">ПЕРВЫЙ ЗАПУСК · ${E(state.config.version)}</span>
     <h2 id="setup-title">Добро пожаловать в LeadEqualMoney</h2>
-    <p>Можно сразу начать с локальной базы и ручной подготовки сообщений. Для этого API-ключи не нужны.</p>
-    <div class="inline-note"><strong>BotFather token не нужен.</strong> Локальная версия не использует Bot API. Для входа в личный Telegram нужны только ваши собственные API ID и API hash; вводите их только в этом окне.</div>
-    <form id="first-run-form" class="form-grid" novalidate>
-      <label class="field">API ID<input name="api_id" type="text" inputmode="numeric" autocomplete="off"></label>
-      <label class="field">API hash<input name="api_hash" type="password" autocomplete="off"></label>
-      <label class="field wide">Номер телефона в международном формате<input name="phone" type="tel" placeholder="+79990000000" autocomplete="tel"></label>
-      <div class="wide setup-error" role="alert" aria-live="assertive" tabindex="-1" hidden></div>
-      <div class="toolbar wide"><button class="btn primary" type="submit">Сохранить API-ключи</button>
-        <button class="ghost" type="button" data-setup-manual>Продолжить без API</button></div>
-    </form>
-    <p class="small muted">Папка данных: ${E(state.config.data_dir)}. Вход по коду можно выполнить позже в «Настройках».</p>
+    <p>Приложение работает локально: можно вести базу, искать организации и собирать медиа.</p>
+    <div class="inline-note"><strong>Telegram не подключается.</strong> Кнопка «Проверить ТГ» только формирует ссылки из номеров карточки. Она не проверяет наличие аккаунта, не запрашивает контакты, не отправляет сообщения и не требует API ID или API hash.</div>
+    <p class="small muted">Папка данных: ${E(state.config.data_dir)}</p>
+    <div class="toolbar"><button class="btn primary" type="button" data-setup-continue>Начать работу</button></div>
   </section>`;
   document.body.append(dialog);
   dialog.addEventListener('cancel', event => event.preventDefault());
   dialog.showModal();
-  dialog.querySelector('[name="api_id"]').focus();
+  dialog.querySelector('[data-setup-continue]').focus();
 }
 
-async function finishFirstRun(dialog, values = null) {
-  const error = dialog.querySelector('.setup-error');
-  error.hidden = true;
+async function finishFirstRun(button) {
   try {
-    if (values) {
-      const apiId = values.get('api_id').trim();
-      const apiHash = values.get('api_hash').trim();
-      const phone = values.get('phone').trim();
-      if (!/^\d+$/.test(apiId) || Number(apiId) <= 0) throw Error('API ID должен быть положительным целым числом.');
-      if (!/^[a-fA-F0-9]{32}$/.test(apiHash)) throw Error('API hash должен содержать 32 шестнадцатеричных символа.');
-      if (!/^\+\d{10,15}$/.test(phone)) throw Error('Введите номер в международном формате, например +79990000000.');
-      await call('telegram_configure', Number(apiId), apiHash, phone);
-    }
     await call('complete_setup');
     state.config.first_run = false;
-    dialog.close(); dialog.remove();
-    if (values) toast('API-ключи сохранены. Код входа можно запросить в «Настройках».');
-    else toast('Готово. Ручной режим можно использовать без API-ключей.');
-    render();
-  } catch (exception) {
-    error.textContent = exception.message || 'Не удалось сохранить настройки. Проверьте поля и повторите.';
-    error.hidden = false;
-    error.focus?.();
+    const dialog = button.closest('dialog');
+    dialog?.close(); dialog?.remove();
+    toast('Готово. Приложение не подключается к Telegram.');
+  } catch (error) {
+    toast(error.message || 'Не удалось завершить настройку.', true);
   }
 }
 
 window.addEventListener('pywebviewready', () => setTimeout(showFirstRunWizard, 250));
-document.addEventListener('submit', event => {
-  if (event.target.id !== 'first-run-form') return;
-  event.preventDefault(); event.stopImmediatePropagation();
-  finishFirstRun(event.target.closest('dialog'), new FormData(event.target));
-}, true);
 document.addEventListener('click', event => {
-  const button = event.target.closest('[data-setup-manual]');
+  const button = event.target.closest('[data-setup-continue]');
   if (!button) return;
   event.preventDefault(); event.stopImmediatePropagation();
-  finishFirstRun(button.closest('dialog'));
+  finishFirstRun(button);
+}, true);
+
+// The desktop Base is organized by parse run. Legacy cards without a run are
+// surfaced virtually by the backend and are never rewritten during browsing.
+state.baseLevel ||= 'niches';
+state.baseNiche = state.baseNiche || null;
+state.baseCity = state.baseCity || null;
+state.baseRunId = state.baseRunId || null;
+
+function baseBreadcrumb(parts) {
+  const node = document.querySelector('#breadcrumb');
+  if (!node) return;
+  node.innerHTML = parts.map((part, index) => index < parts.length - 1
+    ? `<button type="button" class="breadcrumb-action" data-base-level="${E(part.level)}">${E(part.label)}</button>`
+    : `<span aria-current="page">${E(part.label)}</span>`).join('<span class="breadcrumb-separator" aria-hidden="true">›</span>');
+}
+
+function baseDate(value) {
+  if (!value) return 'Ожидает запуска';
+  return String(value).replace('T', ' ').slice(0, 16);
+}
+
+function baseExportButton(scope, title) {
+  return `<button type="button" class="btn" data-base-export='${E(JSON.stringify(scope))}'>Экспорт ${E(title)}</button>`;
+}
+
+async function loadBaseRunBusinesses(append = false) {
+  const list = document.querySelector('#base-business-list');
+  if (!list || !state.baseRunId) return;
+  if (!append) state.baseOffset = 0;
+  const filters = {
+    q: state.baseQuery || '', status: state.baseStatus || '', site_type: state.baseSiteType || '',
+    limit: 50, offset: state.baseOffset || 0,
+  };
+  const rows = await safe(() => call('parse_run_businesses', state.baseRunId, filters));
+  if (!rows) return;
+  if (append && rows.length) list.insertAdjacentHTML('beforeend', rows.map(businessRow).join(''));
+  else if (!append) list.innerHTML = rows.length ? rows.map(businessRow).join('') : empty('Организации не найдены');
+  state.baseOffset = (state.baseOffset || 0) + rows.length;
+  const more = document.querySelector('[data-base-more]');
+  if (more) more.hidden = rows.length < 50;
+}
+
+businesses = async function (node) {
+  state.baseLevel ||= 'niches';
+  const level = state.baseLevel;
+  if (level === 'niches') {
+    state.baseNiche = state.baseCity = state.baseRunId = null;
+    setHeader('База', 'Организации сгруппированы по нише, городу и запуску парсинга');
+    baseBreadcrumb([{label: 'База', level: 'niches'}]);
+    const items = await call('parse_niches');
+    node.innerHTML = `<section class="panel base-hierarchy"><div class="panel-head"><div><span class="section-kicker">КАТЕГОРИИ</span><h2>Ниши</h2><p>Каждый новый поиск сохраняется отдельным запуском.</p></div><div class="toolbar"><button class="btn" data-action="import">Импорт XLSX</button><button class="btn" data-action="export">Экспорт всей базы</button><button class="btn primary" data-nav="search">Новый поиск</button></div></div>
+      ${items.length ? '<div id="base-folder-grid" class="glass-folder-grid" aria-label="Ниши базы"></div>' : `<div class="base-empty">${empty('База пока пуста', 'Запустите первый парсинг или импортируйте организации из XLSX.')}<button class="btn primary" data-nav="search">Начать поиск</button></div>`}</section>`;
+    if (items.length) glassFolderCards.mount(node.querySelector('#base-folder-grid'), items.map(item => ({
+      key: item.key, title: item.name,
+      summary: `${item.city_count} ${item.city_count === 1 ? 'город' : 'городов'} · ${item.organization_count} организаций`,
+      moreCount: item.more_city_count || 0,
+      openData: {'data-base-open-niche': item.key, 'data-base-label': item.name},
+      exportScope: {level: 'niche', niche_key: item.key},
+      files: (item.recent_cities || []).map(city => ({
+        title: city.name, meta: `${city.organization_count} организаций${city.latest_at ? ` · ${baseDate(city.latest_at)}` : ''}`,
+        data: {'data-base-folder-file-niche': item.key, 'data-base-folder-file-niche-label': item.name,
+          'data-base-folder-file-city': city.key, 'data-base-folder-file-city-label': city.name},
+      })),
+    })));
+    return;
+  }
+
+  if (level === 'cities') {
+    setHeader(state.baseNicheLabel || 'Ниша', 'Города и число найденных организаций');
+    baseBreadcrumb([{label: 'База', level: 'niches'}, {label: state.baseNicheLabel || 'Ниша', level: 'cities'}]);
+    const [items, niches] = await Promise.all([call('parse_cities', state.baseNiche), call('parse_niches')]);
+    const niche = niches.find(item => item.key === state.baseNiche);
+    node.innerHTML = `<section class="panel base-hierarchy"><div class="panel-head"><div><span class="section-kicker">НИША</span><h2>${E(state.baseNicheLabel || niche?.name || 'Ниша')}</h2><p>${E(niche?.organization_count || 0)} организаций в этой нише</p></div>${baseExportButton({level: 'niche', niche_key: state.baseNiche}, 'ниши')}</div>
+      ${items.length ? '<div id="base-folder-grid" class="glass-folder-grid" aria-label="Города этой ниши"></div>' : empty('Городов пока нет', 'Запустите поиск в этой нише.')}</section>`;
+    if (items.length) glassFolderCards.mount(node.querySelector('#base-folder-grid'), items.map(item => ({
+      key: `${state.baseNiche}:${item.key}`, title: item.name,
+      summary: `${item.organization_count} организаций · ${item.run_count || 0} запусков`,
+      moreCount: item.more_run_count || 0,
+      openData: {'data-base-open-city': item.key, 'data-base-label': item.name},
+      exportScope: {level: 'city', niche_key: state.baseNiche, city_key: item.key},
+      files: (item.recent_runs || []).map(run => ({
+        title: baseDate(run.display_at || run.started_at), meta: `${run.organization_count} организаций · ${activityLabel(run.status)}`,
+        data: {'data-base-open-run': run.id, 'data-base-label': baseDate(run.display_at || run.started_at),
+          'data-base-folder-run-city': item.key, 'data-base-folder-run-city-label': item.name},
+      })),
+    })));
+    return;
+  }
+
+  if (level === 'runs') {
+    setHeader(state.baseCityLabel || 'Город', 'Запуски парсинга, новые сверху');
+    baseBreadcrumb([{label: 'База', level: 'niches'}, {label: state.baseNicheLabel || 'Ниша', level: 'cities'}, {label: state.baseCityLabel || 'Город', level: 'runs'}]);
+    const items = await call('parse_runs', state.baseNiche, state.baseCity);
+    node.innerHTML = `<section class="panel base-hierarchy"><div class="panel-head"><div><span class="section-kicker">ГОРОД</span><h2>${E(state.baseCityLabel || 'Город')}</h2><p>${items.length} запусков парсинга</p></div>${baseExportButton({level: 'city', niche_key: state.baseNiche, city_key: state.baseCity}, 'города')}</div>
+      ${items.length ? `<div class="base-folder-grid">${items.map(item => `<article class="base-folder"><div><h3>${E(baseDate(item.display_at || item.started_at || item.created_at))}</h3><p>${E(item.organization_count)} организаций · ${E(activityLabel(item.status))}</p></div><button class="btn" data-base-open-run="${E(item.id)}" data-base-label="${E(baseDate(item.display_at || item.started_at || item.created_at))}">Открыть</button></article>`).join('')}</div>` : empty('Запусков пока нет', 'Начните новый поиск, чтобы сохранить первый запуск.')}</section>`;
+    return;
+  }
+
+  if (level === 'businesses') {
+    const [runs, cities] = await Promise.all([call('parse_runs', state.baseNiche, state.baseCity), call('parse_cities', state.baseNiche)]);
+    const run = runs.find(item => item.id === state.baseRunId);
+    const city = cities.find(item => item.key === state.baseCity);
+    state.baseRunLabel ||= run ? baseDate(run.display_at || run.started_at || run.created_at) : 'Запуск';
+    setHeader(state.baseRunLabel, 'Организации этого запуска · карточка, CRM и медиа');
+    baseBreadcrumb([{label: 'База', level: 'niches'}, {label: state.baseNicheLabel || 'Ниша', level: 'cities'}, {label: state.baseCityLabel || city?.name || 'Город', level: 'runs'}, {label: state.baseRunLabel, level: 'businesses'}]);
+    const scope = {level: 'run', niche_key: state.baseNiche, city_key: state.baseCity, run_id: state.baseRunId};
+    node.innerHTML = `<section class="panel"><div class="panel-head"><div><span class="section-kicker">ЗАПУСК · ${E(run?.status ? activityLabel(run.status) : 'Архив')}</span><h2>${E(state.baseRunLabel)}</h2><p>${E(run?.organization_count ?? 0)} организаций</p></div>${baseExportButton(scope, 'запуска')}</div>
+      <div class="toolbar base-filters"><input id="base-run-query" aria-label="Имя или адрес" placeholder="Имя или адрес" value="${E(state.baseQuery || '')}">
+        <select id="base-run-status" aria-label="Фильтр по статусу"><option value="">Все статусы</option>${Object.entries(state.config?.statuses || {}).map(([key, label]) => `<option value="${E(key)}" ${state.baseStatus === key ? 'selected' : ''}>${E(label)}</option>`).join('')}</select>
+        <select id="base-run-site-type" aria-label="Фильтр по типу сайта"><option value="">Все типы сайтов</option><option value="no_site" ${state.baseSiteType === 'no_site' ? 'selected' : ''}>Без сайта</option><option value="weak_site" ${state.baseSiteType === 'weak_site' ? 'selected' : ''}>Конструктор</option><option value="unavailable" ${state.baseSiteType === 'unavailable' ? 'selected' : ''}>Недоступен</option></select>
+      </div><div id="base-business-list" class="list">${empty('Загрузка организаций…')}</div><button type="button" class="btn" data-base-more style="margin-top:12px">Показать ещё</button></section>`;
+    await loadBaseRunBusinesses(false);
+    const query = node.querySelector('#base-run-query');
+    let timer;
+    query.oninput = () => {
+      state.baseQuery = query.value.trim();
+      clearTimeout(timer);
+      timer = setTimeout(() => loadBaseRunBusinesses(false), 250);
+    };
+    node.querySelector('#base-run-status').onchange = event => { state.baseStatus = event.target.value; loadBaseRunBusinesses(false); };
+    node.querySelector('#base-run-site-type').onchange = event => { state.baseSiteType = event.target.value; loadBaseRunBusinesses(false); };
+  }
+};
+
+const baseSetViewWithHierarchy = setView;
+setView = function (view, extra = {}) {
+  if (view === 'businesses') {
+    state.baseLevel = 'niches';
+    state.baseNiche = state.baseCity = state.baseRunId = null;
+    state.baseQuery = state.baseStatus = state.baseSiteType = '';
+    state.baseRunLabel = null;
+  }
+  return baseSetViewWithHierarchy(view, extra);
+};
+
+// Multi-city input creates one independently tracked job for each city.
+const renderSearchWithCities = search;
+search = async function (node) {
+  await renderSearchWithCities(node);
+  let city = node.querySelector('#search-form [name="city"]');
+  if (city) {
+    const area = document.createElement('textarea');
+    area.name = 'city';
+    area.required = true;
+    area.rows = 2;
+    area.placeholder = 'Казань, Самара';
+    area.value = city.value;
+    city.replaceWith(area);
+    city = area;
+    if (city.parentElement?.firstChild?.nodeType === Node.TEXT_NODE) {
+      city.parentElement.firstChild.textContent = 'Города (через запятую, точку с запятой или новую строку)';
+    }
+  }
+};
+
+document.addEventListener('submit', event => {
+  const form = event.target;
+  if (form?.id !== 'search-form') return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  safe(async () => {
+    const data = new FormData(form);
+    const result = await call('search_start', {
+      country: data.get('country'), city: data.get('city'), niche: data.get('niche'),
+      count: Number(data.get('count')), types: data.getAll('types'),
+      review_limit: Number(data.get('review_limit') || 0),
+    });
+    toast(`Создано запусков: ${result.count}`);
+    render();
+  });
+}, true);
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (!button) return;
+  if (button.dataset.baseLevel) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    state.baseLevel = button.dataset.baseLevel;
+    if (state.baseLevel === 'niches') state.baseNiche = state.baseCity = state.baseRunId = null;
+    else if (state.baseLevel === 'cities') state.baseCity = state.baseRunId = null;
+    else if (state.baseLevel === 'runs') state.baseRunId = null;
+    render();
+  } else if (button.dataset.baseOpenNiche) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    state.baseNiche = button.dataset.baseOpenNiche;
+    state.baseNicheLabel = button.dataset.baseLabel;
+    state.baseLevel = 'cities'; render();
+  } else if (button.dataset.baseOpenCity) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    state.baseCity = button.dataset.baseOpenCity;
+    state.baseCityLabel = button.dataset.baseLabel;
+    state.baseLevel = 'runs'; render();
+  } else if (button.dataset.baseFolderFileCity) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    state.baseNiche = button.dataset.baseFolderFileNiche;
+    state.baseNicheLabel = button.dataset.baseFolderFileNicheLabel;
+    state.baseCity = button.dataset.baseFolderFileCity;
+    state.baseCityLabel = button.dataset.baseFolderFileCityLabel;
+    state.baseLevel = 'runs'; render();
+  } else if (button.dataset.baseOpenRun) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    state.baseRunId = button.dataset.baseOpenRun;
+    state.baseCity = button.dataset.baseFolderRunCity || state.baseCity;
+    state.baseCityLabel = button.dataset.baseFolderRunCityLabel || state.baseCityLabel;
+    state.baseRunLabel = button.dataset.baseLabel;
+    state.baseLevel = 'businesses';
+    state.baseQuery = state.baseStatus = state.baseSiteType = '';
+    render();
+  } else if (button.hasAttribute('data-base-more')) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    loadBaseRunBusinesses(true);
+  } else if (button.hasAttribute('data-base-export')) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    safe(async () => {
+      const scope = JSON.parse(button.dataset.baseExport);
+      const result = await call('export_scope', scope);
+      if (result) toast(`Экспортировано ${result.count} карточек`);
+    });
+  }
 }, true);

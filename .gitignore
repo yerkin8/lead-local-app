@@ -125,6 +125,8 @@ logs/
 .testdata/
 LeadGen Base/
 /reference_audit/ref_copy/
+.taste-skill/
+/publish_export/
 *.tmp
 *.temp
 *.bak
@@ -138,4 +140,6 @@ LeadGen Base/
 *.jpeg
 *.webp
 *.gif
+!app/assets/lem-icon.png
+!app/assets/lem-icon.ico
 /Чек-лист по нейро-визуалу.pdf

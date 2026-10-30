@@ -4,12 +4,12 @@ import re
 from urllib.parse import urlparse
 
 STATUSES = {
-    "not_started": "Не начал",
-    "waiting": "Написал / жду ответ",
+    "not_started": "Не начато",
+    "waiting": "Написал",
     "replied": "Ответили",
     "working": "В работе",
-    "completed": "Завершен",
-    "unsuitable": "Не подходит",
+    "completed": "Договорились",
+    "unsuitable": "Отказ",
 }
 SITE_TYPES = {"no_site", "weak_site", "unavailable"}
 COUNTRIES = (

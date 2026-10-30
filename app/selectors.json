@@ -1,0 +1,46 @@
+{
+  "organization": {
+    "name": "h1.orgpage-header-view__header",
+    "categories": "a.orgpage-categories-info-view__link",
+    "phones": "div.orgpage-phones-view__phone-number",
+    "website_text": "span.business-urls-view__text",
+    "rating": "span.business-rating-badge-view__rating-text",
+    "review_count": "div.business-header-rating-view__text",
+    "address": "a.orgpage-header-view__address",
+    "social_links": ".business-contacts-view__social-button a[href^='http']",
+    "contact_links": ".business-contacts-view__social-button a[href^='http'], .business-contacts-view__link[href^='http'], .business-urls-view__link[href^='http']",
+    "review_link": "a[href*='/reviews/']",
+    "gallery_link": "a[href*='/gallery/']",
+    "fallback_social_links": "a[href^='http']"
+  },
+  "search": {
+    "snippets": ".search-business-snippet-view__content",
+    "organization_links": "a[href*='/maps/org/']",
+    "next_pages": "a[href*='page=']",
+    "scroll_roots": ".search-list-view__list,.search-list-view,.scroll",
+    "captcha": ["form[action*='checkcaptcha']", "input[name*='captcha']", ".SmartCaptcha", ".CheckboxCaptcha"]
+  },
+  "structured_data": {
+    "json_ld": "script[type='application/ld+json']",
+    "description_meta": "meta[name='description'], meta[property='og:description']",
+    "geo_meta": "meta[name='geo.position']"
+  },
+  "reviews": {
+    "cards": ".business-reviews-card-view",
+    "text": ".business-review-view__body-text, [itemprop='reviewBody']",
+    "rating": "[itemprop='ratingValue'], .business-rating-badge-view__rating",
+    "date": "time[datetime], .business-review-view__date",
+    "company_response": ".business-review-view__company-response-text",
+    "pagination_links": "a[href*='/reviews/'], a[href*='page=']",
+    "scroll_container": ".business-reviews-view__list, .scroll__container",
+    "max_scrolls": 40,
+    "stale_scrolls": 3,
+    "selectors_verified": false
+  },
+  "gallery": {
+    "photos": "img.media-wrapper__media",
+    "scroll_container": ".scroll__container",
+    "max_scrolls": 30,
+    "stale_scrolls": 3
+  }
+}

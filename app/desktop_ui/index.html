@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LeadEqualMoney · LEM</title><link rel="stylesheet" href="lem.css"><link rel="stylesheet" href="style.css">
+  <title>LeadEqualMoney · LEM</title><link rel="stylesheet" href="lem.css"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="glass-folder.css">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Перейти к содержимому</a>
@@ -12,14 +12,13 @@
       <button type="button" data-view="dashboard" class="active" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/></svg> Панель</button>
       <button type="button" data-view="search" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.8" cy="10.8" r="6.6"/><path d="m16 16 4.5 4.5"/></svg> Поиск</button>
       <button type="button" data-view="businesses" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V5.5L12 3l8 2.5V20H4Z"/><path d="M8 20v-5h8v5M8 8h.01M12 8h.01M16 8h.01M8 11h.01M12 11h.01M16 11h.01" stroke-linecap="round"/></svg> База</button>
+      <button type="button" data-view="scripts" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg> Скрипты</button>
       <button type="button" data-view="media" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="4" width="17" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.3"/><path d="m4.5 17 5-5 3.5 3 2.5-2 4 4"/></svg> Медиа</button>
-      <button type="button" data-view="scripts" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4.5h14v15H5zM8 8h8M8 12h8M8 16h5" stroke-linecap="round"/></svg> Скрипты</button>
-      <button type="button" data-view="campaigns" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m21 3-7.4 18-3.8-7.8L2 9.5 21 3Z"/><path d="m9.8 13.2 5-5"/></svg> Рассылки</button>
       <button type="button" data-view="settings" aria-controls="content"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="m19.4 13.5 1.1.9-1.4 2.4-1.4-.5a8 8 0 0 1-1.5.9l-.3 1.5h-2.8l-.3-1.5a8 8 0 0 1-1.5-.9l-1.4.5-1.4-2.4 1.1-.9a7 7 0 0 1 0-1.8l-1.1-.9 1.4-2.4 1.4.5a8 8 0 0 1 1.5-.9l.3-1.5h2.8l.3 1.5a8 8 0 0 1 1.5.9l1.4-.5 1.4 2.4-1.1.9a7 7 0 0 1 0 1.8Z"/></svg> Настройки</button>
     </nav>
     <div class="sidebar-bottom"><span class="status-dot" aria-hidden="true"></span> Локальное приложение <small id="data-dir"></small></div>
   </aside>
   <main class="main" id="main-content"><header class="topbar"><div><div class="eyebrow">LEM / <span id="breadcrumb">ПАНЕЛЬ</span></div><h1 id="page-title">Панель управления</h1><p id="page-description">Всё важное по базе и текущим заданиям</p></div><div class="top-actions"><button type="button" class="ghost" id="refresh"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 7v5h-5M4.8 16a8 8 0 0 0 13.4 2M4 17v-5h5M19.2 8A8 8 0 0 0 5.8 6" stroke-linecap="round" stroke-linejoin="round"/></svg> Обновить</button><span class="avatar" aria-label="LeadEqualMoney">LEM</span></div></header><div id="content" class="content" tabindex="-1"></div></main>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="activity-poller.js"></script><script src="app.js"></script><script src="flows.js"></script>
+  <script src="activity-poller.js"></script><script src="app.js"></script><script src="glass-folder.js"></script><script src="flows.js"></script><script src="stage9.js"></script>
 </body></html>

@@ -33,7 +33,7 @@ class ParserExtractionTests(unittest.TestCase):
             return url, ("<div class='search-business-snippet-view__content'>"
                          f"<a href='/maps/org/business/{identity}/'>Card</a></div>")
 
-        def fake_org(url, _page):
+        def fake_org(url, _page, _review_limit=100):
             return {"id": url.rstrip("/").split("/")[-1], "site_type": "no_site", "address": "Тверь"}
 
         job = {"id": "test-job", "params": {"country": "Россия", "city": "Тверь",

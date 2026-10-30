@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,10 +12,58 @@ from pathlib import Path
 from .config import DB_PATH
 from .domain import STATUSES, normalized, org_id
 from .script_templates import TEMPLATES
+from .yandex_urls import normalize_yandex_url
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+DETAILS_SCHEMA_VERSION = 1
+DESKTOP_SCHEMA_VERSION = 3
+
+
+def _schema_state(path: Path) -> tuple[bool, int]:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False, 0
+    source = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        tables = {row[0] for row in source.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if not tables:
+            return False, 0
+        if "schema_migrations" not in tables:
+            return True, 0
+        row = source.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+        return True, int(row[0] or 0)
+    finally:
+        source.close()
+
+
+def _backup_before_migration(path: Path, target_version: int) -> Path | None:
+    """Take a consistent SQLite backup before the first additive schema upgrade."""
+    exists, current_version = _schema_state(path)
+    if not exists or current_version >= target_version:
+        return None
+    folder = path.parent / "backups"
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    target = folder / f"{path.stem}-pre-schema-v{target_version}-{stamp}-{uuid.uuid4().hex[:8]}.sqlite3"
+    source = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=30)
+    destination = sqlite3.connect(target, timeout=30)
+    try:
+        source.backup(destination)
+        check = destination.execute("PRAGMA integrity_check").fetchone()
+        if not check or check[0] != "ok":
+            raise sqlite3.DatabaseError("Pre-migration SQLite backup failed integrity_check")
+    except Exception:
+        destination.close()
+        source.close()
+        target.unlink(missing_ok=True)
+        raise
+    destination.close()
+    source.close()
+    return target
 
 
 @contextmanager
@@ -184,6 +233,301 @@ def init_db(path: Path = DB_PATH) -> None:
                     WHERE slug=? AND body=?""", (title, body, now(), slug, old_body))
 
 
+def init_desktop_db(path: Path = DB_PATH) -> None:
+    """Initialize desktop-only CRM extensions without changing server-mode startup."""
+    _backup_before_migration(path, DESKTOP_SCHEMA_VERSION)
+    init_db(path)
+    with connection(path) as db:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS business_details (
+            business_id TEXT PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
+            description TEXT, latitude REAL, longitude REAL, photo_count INTEGER,
+            categories_json TEXT NOT NULL DEFAULT '[]', details_complete INTEGER NOT NULL DEFAULT 0,
+            reviews_complete INTEGER NOT NULL DEFAULT 0, requested_review_limit INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            review_key TEXT NOT NULL, text TEXT NOT NULL, rating REAL, review_date TEXT,
+            company_response TEXT, inserted_at TEXT NOT NULL,
+            UNIQUE(business_id,review_key)
+        );
+        CREATE TABLE IF NOT EXISTS links (
+            business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            type TEXT NOT NULL, url TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(business_id,type,url)
+        );
+        CREATE TABLE IF NOT EXISTS hours (
+            business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            weekday TEXT NOT NULL, opens TEXT NOT NULL DEFAULT '', closes TEXT NOT NULL DEFAULT '',
+            is_closed INTEGER NOT NULL DEFAULT 0, raw TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(business_id,weekday,opens,closes,raw)
+        );
+        CREATE TABLE IF NOT EXISTS features (
+            business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            name TEXT NOT NULL, value TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(business_id,name,value)
+        );
+        CREATE TABLE IF NOT EXISTS desktop_settings (
+            key TEXT PRIMARY KEY, value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS parse_runs (
+            id TEXT PRIMARY KEY,
+            niche TEXT NOT NULL,
+            niche_key TEXT NOT NULL,
+            country TEXT NOT NULL,
+            city TEXT NOT NULL,
+            city_key TEXT NOT NULL,
+            job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+            started_at TEXT,
+            ended_at TEXT,
+            params_json TEXT NOT NULL,
+            organization_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'queued',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS parse_run_businesses (
+            parse_run_id TEXT NOT NULL REFERENCES parse_runs(id) ON DELETE CASCADE,
+            business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            linked_at TEXT NOT NULL,
+            PRIMARY KEY(parse_run_id,business_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_reviews_business_date ON reviews(business_id,review_date);
+        CREATE INDEX IF NOT EXISTS idx_links_business_type ON links(business_id,type);
+        CREATE INDEX IF NOT EXISTS idx_parse_runs_niche_city ON parse_runs(niche_key,city_key,created_at);
+        CREATE INDEX IF NOT EXISTS idx_parse_run_business_business ON parse_run_businesses(business_id);
+        """)
+        timestamp = now()
+        db.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?,?)", (DETAILS_SCHEMA_VERSION, timestamp))
+        db.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?,?)", (DESKTOP_SCHEMA_VERSION, timestamp))
+        # Idempotent host migration. _backup_before_migration() ran before this transaction.
+        for row in db.execute("SELECT id,map_url FROM businesses"):
+            normalized_url = normalize_yandex_url(row["map_url"])
+            if normalized_url != row["map_url"]:
+                db.execute("UPDATE businesses SET map_url=?,updated_at=? WHERE id=?",
+                           (normalized_url, now(), row["id"]))
+
+
+def _label_key(value: str) -> tuple[str, str]:
+    display = re.sub(r"\s+", " ", str(value or "")).strip()
+    return display, normalized(display)
+
+
+def create_desktop_parse_jobs(params: dict, cities: list[str], path: Path = DB_PATH) -> list[dict]:
+    """Atomically create one desktop parse run and queue job for each requested city."""
+    if not cities:
+        raise ValueError("Укажите хотя бы один город")
+    niche, niche_key = _label_key(params.get("niche", ""))
+    if not niche or not niche_key:
+        raise ValueError("Укажите нишу")
+    country = str(params.get("country", "")).strip()
+    base_params = {key: value for key, value in params.items() if key not in {"city", "cities"}}
+    created = []
+    seen_city_keys: set[str] = set()
+    with connection(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for raw_city in cities:
+            city, city_key = _label_key(raw_city)
+            if not city or not city_key or city_key in seen_city_keys:
+                continue
+            seen_city_keys.add(city_key)
+            run_id = uuid.uuid4().hex
+            job_id = uuid.uuid4().hex
+            item_params = {**base_params, "city": city, "_desktop_details": True,
+                           "_desktop_parse_run_id": run_id}
+            stamp = now()
+            conn.execute("INSERT INTO jobs(id,kind,status,params,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                         (job_id, "search", "queued", json.dumps(item_params, ensure_ascii=False), stamp, stamp))
+            conn.execute("""INSERT INTO parse_runs
+                (id,niche,niche_key,country,city,city_key,job_id,params_json,status,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (run_id, niche, niche_key, country, city, city_key, job_id,
+                 json.dumps(base_params | {"city": city}, ensure_ascii=False), "queued", stamp))
+            created.append({"id": job_id, "run_id": run_id, "kind": "search", "status": "queued",
+                            "params": item_params, "created_at": stamp})
+        if not created:
+            raise ValueError("Не удалось определить города")
+    return created
+
+
+def start_parse_run(run_id: str, path: Path = DB_PATH) -> None:
+    stamp = now()
+    with connection(path) as conn:
+        conn.execute("""UPDATE parse_runs SET status='running',started_at=COALESCE(started_at,?),ended_at=NULL
+            WHERE id=?""", (stamp, run_id))
+
+
+def finish_parse_run(run_id: str, status: str, path: Path = DB_PATH) -> None:
+    if status not in {"done", "failed", "stopped", "interrupted"}:
+        raise ValueError("Недопустимый статус запуска парсинга")
+    with connection(path) as conn:
+        conn.execute("""UPDATE parse_runs SET status=?,ended_at=?,organization_count=(
+            SELECT COUNT(*) FROM parse_run_businesses WHERE parse_run_id=?) WHERE id=?""",
+            (status, now(), run_id, run_id))
+
+
+def link_parse_run_business(run_id: str, business_id: str, path: Path = DB_PATH) -> bool:
+    with connection(path) as conn:
+        if not conn.execute("SELECT 1 FROM parse_runs WHERE id=?", (run_id,)).fetchone():
+            return False
+        if not conn.execute("SELECT 1 FROM businesses WHERE id=?", (business_id,)).fetchone():
+            return False
+        conn.execute("INSERT OR IGNORE INTO parse_run_businesses VALUES (?,?,?)", (run_id, business_id, now()))
+        conn.execute("UPDATE parse_runs SET organization_count=(SELECT COUNT(*) FROM parse_run_businesses WHERE parse_run_id=?) WHERE id=?",
+                     (run_id, run_id))
+        return True
+
+
+def _legacy_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("""SELECT COUNT(*) FROM businesses b WHERE NOT EXISTS(
+        SELECT 1 FROM parse_run_businesses rb WHERE rb.business_id=b.id)""").fetchone()[0])
+
+
+def parse_niches(path: Path = DB_PATH) -> list[dict]:
+    with connection(path) as conn:
+        rows = [dict(row) for row in conn.execute("""SELECT MIN(niche) AS name,niche_key AS key,
+            COUNT(DISTINCT city_key) AS city_count,COUNT(DISTINCT rb.business_id) AS organization_count,
+            MAX(COALESCE(started_at,created_at)) AS latest_at
+            FROM parse_runs p LEFT JOIN parse_run_businesses rb ON rb.parse_run_id=p.id
+            GROUP BY niche_key ORDER BY name COLLATE NOCASE""")]
+        recent_cities: dict[str, list[dict]] = {}
+        for city in conn.execute("""SELECT p.niche_key,MIN(p.city) AS name,p.city_key AS key,
+            COUNT(DISTINCT rb.business_id) AS organization_count,
+            MAX(COALESCE(p.started_at,p.created_at)) AS latest_at
+            FROM parse_runs p LEFT JOIN parse_run_businesses rb ON rb.parse_run_id=p.id
+            GROUP BY p.niche_key,p.city_key ORDER BY latest_at DESC"""):
+            items = recent_cities.setdefault(city["niche_key"], [])
+            if len(items) < 4:
+                items.append({"name": city["name"], "key": city["key"],
+                             "organization_count": int(city["organization_count"]),
+                             "latest_at": city["latest_at"]})
+        legacy_count = _legacy_count(conn)
+    for row in rows:
+        row["recent_cities"] = recent_cities.get(row["key"], [])
+        row["more_city_count"] = max(0, int(row["city_count"]) - len(row["recent_cities"]))
+    if legacy_count:
+        rows.append({"name": "Без ниши", "key": "__legacy_niche__", "city_count": 1,
+                     "organization_count": legacy_count, "latest_at": None, "legacy": True,
+                     "recent_cities": [{"name": "Без города", "key": "__legacy_city__",
+                                        "organization_count": legacy_count, "latest_at": None}],
+                     "more_city_count": 0})
+    return rows
+
+
+def parse_cities(niche_key: str, path: Path = DB_PATH) -> list[dict]:
+    if niche_key == "__legacy_niche__":
+        with connection(path) as conn:
+            count = _legacy_count(conn)
+        if not count:
+            return []
+        runs = parse_runs_for_city(niche_key, "__legacy_city__", path)
+        return [{"name": "Без города", "key": "__legacy_city__", "organization_count": count,
+                 "latest_at": None, "legacy": True, "recent_runs": runs[:4],
+                 "more_run_count": max(0, len(runs) - 4), "run_count": len(runs)}]
+    with connection(path) as conn:
+        cities = [dict(row) for row in conn.execute("""SELECT MIN(city) AS name,city_key AS key,
+            COUNT(DISTINCT rb.business_id) AS organization_count,
+            MAX(COALESCE(p.started_at,p.created_at)) AS latest_at
+            FROM parse_runs p LEFT JOIN parse_run_businesses rb ON rb.parse_run_id=p.id
+            WHERE p.niche_key=? GROUP BY city_key ORDER BY name COLLATE NOCASE""", (niche_key,))]
+        recent_runs: dict[str, list[dict]] = {}
+        run_counts: dict[str, int] = {}
+        for run in conn.execute("""SELECT p.city_key,p.id,COALESCE(p.started_at,p.created_at) AS display_at,
+            p.started_at,p.ended_at,p.status,COUNT(rb.business_id) AS organization_count
+            FROM parse_runs p LEFT JOIN parse_run_businesses rb ON rb.parse_run_id=p.id
+            WHERE p.niche_key=? GROUP BY p.id ORDER BY display_at DESC""", (niche_key,)):
+            run_counts[run["city_key"]] = run_counts.get(run["city_key"], 0) + 1
+            items = recent_runs.setdefault(run["city_key"], [])
+            if len(items) < 4:
+                items.append({"id": run["id"], "display_at": run["display_at"],
+                              "started_at": run["started_at"], "ended_at": run["ended_at"],
+                              "status": run["status"], "organization_count": int(run["organization_count"])})
+    for city in cities:
+        city["recent_runs"] = recent_runs.get(city["key"], [])
+        city["run_count"] = run_counts.get(city["key"], 0)
+        city["more_run_count"] = max(0, city["run_count"] - len(city["recent_runs"]))
+    return cities
+
+
+def parse_runs_for_city(niche_key: str, city_key: str, path: Path = DB_PATH) -> list[dict]:
+    if niche_key == "__legacy_niche__" and city_key == "__legacy_city__":
+        with connection(path) as conn:
+            rows = conn.execute("""SELECT substr(b.created_at,1,10) AS day,COUNT(*) AS organization_count
+                FROM businesses b WHERE NOT EXISTS(SELECT 1 FROM parse_run_businesses rb WHERE rb.business_id=b.id)
+                GROUP BY substr(b.created_at,1,10) ORDER BY day DESC""").fetchall()
+        return [{"id": f"legacy:{row['day']}", "display_at": row["day"], "created_at": row["day"],
+                 "started_at": None, "ended_at": None, "status": "done",
+                 "organization_count": int(row["organization_count"]), "legacy": True}
+                for row in rows]
+    with connection(path) as conn:
+        return [dict(row) for row in conn.execute("""SELECT p.id,p.niche,p.city,p.job_id,p.started_at,p.ended_at,
+            p.status,p.created_at,COUNT(rb.business_id) AS organization_count,
+            COALESCE(p.started_at,p.created_at) AS display_at
+            FROM parse_runs p LEFT JOIN parse_run_businesses rb ON rb.parse_run_id=p.id
+            WHERE p.niche_key=? AND p.city_key=? GROUP BY p.id
+            ORDER BY display_at DESC,p.created_at DESC""", (niche_key, city_key))]
+
+
+def parse_run_businesses(run_id: str, path: Path = DB_PATH, *, query: str = "", limit: int = 50,
+                         offset: int = 0, status: str | None = None,
+                         site_type: str | None = None) -> list[dict]:
+    limit = min(200, max(1, int(limit)))
+    offset = max(0, int(offset))
+    conditions = ["(?='' OR b.name LIKE ? OR b.address LIKE ?)"]
+    args: list = [query, f"%{query}%", f"%{query}%"]
+    if status:
+        conditions.append("b.status=?")
+        args.append(status)
+    if site_type:
+        conditions.append("b.site_type=?")
+        args.append(site_type)
+    filters = " AND ".join(conditions)
+    with connection(path) as conn:
+        if run_id.startswith("legacy:"):
+            day = run_id.partition(":")[2]
+            rows = conn.execute("""SELECT b.id FROM businesses b
+                WHERE substr(b.created_at,1,10)=? AND NOT EXISTS(
+                    SELECT 1 FROM parse_run_businesses rb WHERE rb.business_id=b.id)
+                AND """ + filters + " ORDER BY b.created_at DESC LIMIT ? OFFSET ?",
+                (day, *args, limit, offset)).fetchall()
+        else:
+            rows = conn.execute("""SELECT b.id FROM parse_run_businesses rb
+                JOIN businesses b ON b.id=rb.business_id WHERE rb.parse_run_id=?
+                AND """ + filters + " ORDER BY b.created_at DESC LIMIT ? OFFSET ?",
+                (run_id, *args, limit, offset)).fetchall()
+        ids = [row[0] for row in rows]
+    return [business(identity, path) for identity in ids]
+
+
+def business_ids_for_scope(scope: dict, path: Path = DB_PATH) -> set[str]:
+    level = scope.get("level")
+    niche_key, city_key, run_id = scope.get("niche_key"), scope.get("city_key"), scope.get("run_id")
+    with connection(path) as conn:
+        if level == "run" and isinstance(run_id, str) and run_id.startswith("legacy:"):
+            day = run_id.partition(":")[2]
+            rows = conn.execute("""SELECT b.id FROM businesses b WHERE substr(b.created_at,1,10)=?
+                AND NOT EXISTS(SELECT 1 FROM parse_run_businesses rb WHERE rb.business_id=b.id)""", (day,))
+        elif level == "run" and run_id:
+            rows = conn.execute("SELECT business_id FROM parse_run_businesses WHERE parse_run_id=?", (run_id,))
+        elif niche_key == "__legacy_niche__":
+            rows = conn.execute("""SELECT b.id FROM businesses b WHERE NOT EXISTS(
+                SELECT 1 FROM parse_run_businesses rb WHERE rb.business_id=b.id)""")
+        elif level == "city":
+            rows = conn.execute("""SELECT DISTINCT rb.business_id FROM parse_runs p
+                JOIN parse_run_businesses rb ON rb.parse_run_id=p.id WHERE p.niche_key=? AND p.city_key=?""",
+                (niche_key, city_key))
+        elif level == "niche":
+            rows = conn.execute("""SELECT DISTINCT rb.business_id FROM parse_runs p
+                JOIN parse_run_businesses rb ON rb.parse_run_id=p.id WHERE p.niche_key=?""", (niche_key,))
+        else:
+            raise ValueError("Неизвестный уровень экспорта")
+        return {row[0] for row in rows}
+
+
 def create_job(kind: str, params: dict, path: Path = DB_PATH) -> str:
     job_id = uuid.uuid4().hex
     with connection(path) as db:
@@ -237,10 +581,158 @@ def update_job(job_id: str, *, status: str | None = None, progress: dict | None 
         db.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id=?", values)
 
 
-def upsert_business(data: dict, tag: tuple[str, str, str], job_id: str, path: Path = DB_PATH) -> bool:
+def _review_key(review: dict) -> str:
+    payload = {
+        "text": re.sub(r"\s+", " ", str(review.get("text") or "")).strip().casefold(),
+        "rating": review.get("rating"),
+        "date": str(review.get("date") or "").strip(),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _store_details(db: sqlite3.Connection, business_id: str, data: dict,
+                   review_limit: int = 100) -> None:
+    details = data.get("details") or {}
+    db.execute("""INSERT INTO business_details
+        (business_id,description,latitude,longitude,photo_count,categories_json,details_complete,
+         requested_review_limit,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(business_id) DO UPDATE SET
+        description=COALESCE(excluded.description,business_details.description),
+        latitude=COALESCE(excluded.latitude,business_details.latitude),
+        longitude=COALESCE(excluded.longitude,business_details.longitude),
+        photo_count=COALESCE(excluded.photo_count,business_details.photo_count),
+        categories_json=CASE WHEN excluded.categories_json='[]' THEN business_details.categories_json
+                             ELSE excluded.categories_json END,
+        details_complete=MAX(business_details.details_complete,excluded.details_complete),
+        requested_review_limit=excluded.requested_review_limit,
+        updated_at=excluded.updated_at""",
+        (business_id, details.get("description"), details.get("latitude"), details.get("longitude"),
+         details.get("photo_count"), json.dumps(details.get("categories") or [], ensure_ascii=False),
+         int(bool(details.get("details_complete"))), min(100, max(0, int(review_limit))), now()))
+
+    for item in data.get("links") or []:
+        url = str(item.get("url") or "").strip()
+        link_type = str(item.get("type") or "other")
+        if url.startswith(("https://", "http://")) and link_type in {"website", "social", "messenger", "other"}:
+            db.execute("INSERT OR IGNORE INTO links VALUES (?,?,?,?)",
+                       (business_id, link_type, url, str(item.get("label") or "")[:200]))
+    for item in data.get("hours") or []:
+        weekday = str(item.get("weekday") or "").strip()[:40]
+        if weekday:
+            db.execute("INSERT OR IGNORE INTO hours VALUES (?,?,?,?,?,?)",
+                       (business_id, weekday, str(item.get("opens") or "")[:20],
+                        str(item.get("closes") or "")[:20], int(bool(item.get("closed"))),
+                        str(item.get("raw") or "")[:200]))
+    for item in data.get("features") or []:
+        name = str(item.get("name") or "").strip()[:200]
+        if name:
+            db.execute("INSERT OR IGNORE INTO features VALUES (?,?,?)",
+                       (business_id, name, str(item.get("value") or "")[:500]))
+    _store_reviews(db, business_id, data.get("review_items") or [], review_limit)
+    count = db.execute("SELECT COUNT(*) FROM reviews WHERE business_id=?", (business_id,)).fetchone()[0]
+    if count >= min(100, max(0, int(review_limit))):
+        db.execute("UPDATE business_details SET reviews_complete=1 WHERE business_id=?", (business_id,))
+
+
+def _store_reviews(db: sqlite3.Connection, business_id: str,
+                   reviews: list[dict], review_limit: int = 100) -> int:
+    cap = min(100, max(0, int(review_limit)))
+    stored = db.execute("SELECT COUNT(*) FROM reviews WHERE business_id=?", (business_id,)).fetchone()[0]
+    added = 0
+    for item in reviews:
+        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+        if not text or stored >= cap:
+            continue
+        key = _review_key(item)
+        cursor = db.execute("""INSERT OR IGNORE INTO reviews
+            (business_id,review_key,text,rating,review_date,company_response,inserted_at)
+            VALUES (?,?,?,?,?,?,?)""",
+            (business_id, key, text[:10000], item.get("rating"),
+             str(item.get("date") or "")[:80] or None,
+             str(item.get("company_response") or "")[:5000] or None, now()))
+        if cursor.rowcount:
+            added += 1
+            stored += 1
+    return added
+
+
+def append_business_reviews(business_id: str, reviews: list[dict],
+                            review_limit: int = 100, path: Path = DB_PATH) -> int:
+    """Persist each fetched review batch so an interrupted desktop job can resume."""
+    with connection(path) as conn:
+        if not conn.execute("SELECT 1 FROM businesses WHERE id=?", (business_id,)).fetchone():
+            return 0
+        return _store_reviews(conn, business_id, reviews, review_limit)
+
+
+def business_review_count(business_id: str, path: Path = DB_PATH) -> int:
+    with connection(path) as conn:
+        row = conn.execute("SELECT COUNT(*) FROM reviews WHERE business_id=?", (business_id,)).fetchone()
+        return int(row[0])
+
+
+def set_review_collection_state(business_id: str, review_limit: int, complete: bool,
+                                path: Path = DB_PATH) -> None:
+    cap = min(100, max(0, int(review_limit)))
+    with connection(path) as conn:
+        count, expected = conn.execute("""SELECT (SELECT COUNT(*) FROM reviews WHERE business_id=?),
+            reviews FROM businesses WHERE id=?""", (business_id, business_id)).fetchone()
+        expected_count = cap if expected is None else int(expected)
+        enough = count >= min(cap, expected_count)
+        conn.execute("""UPDATE business_details SET requested_review_limit=?,reviews_complete=?,updated_at=?
+            WHERE business_id=?""", (cap, int(bool(complete and enough)), now(), business_id))
+
+
+def business_needs_review_resume(job_id: str, business_id: str, review_limit: int,
+                                 path: Path = DB_PATH) -> bool:
+    cap = min(100, max(0, int(review_limit)))
+    if cap == 0:
+        return False
+    with connection(path) as conn:
+        row = conn.execute("""SELECT d.reviews_complete,d.requested_review_limit,b.reviews,
+            (SELECT COUNT(*) FROM reviews r WHERE r.business_id=b.id) AS stored,
+            EXISTS(SELECT 1 FROM job_results jr WHERE jr.job_id=? AND jr.business_id=b.id) AS belongs
+            FROM businesses b LEFT JOIN business_details d ON d.business_id=b.id WHERE b.id=?""",
+            (job_id, business_id)).fetchone()
+        return bool(row and row["belongs"] and not row["reviews_complete"]
+                    and int(row["requested_review_limit"] or 0) > 0
+                    and row["stored"] < min(cap, int(row["reviews"] or cap)))
+
+
+def job_result_count(job_id: str, path: Path = DB_PATH) -> int:
+    with connection(path) as conn:
+        row = conn.execute("SELECT COUNT(*) FROM job_results WHERE job_id=?", (job_id,)).fetchone()
+        return int(row[0])
+
+
+def incomplete_job_review_items(job_id: str, review_limit: int,
+                                path: Path = DB_PATH) -> list[dict]:
+    cap = min(100, max(0, int(review_limit)))
+    if cap == 0:
+        return []
+    with connection(path) as conn:
+        rows = conn.execute("""SELECT b.id,b.map_url FROM job_results jr
+            JOIN businesses b ON b.id=jr.business_id
+            JOIN business_details d ON d.business_id=b.id
+            WHERE jr.job_id=? AND d.reviews_complete=0 AND d.requested_review_limit>0
+              AND (SELECT COUNT(*) FROM reviews r WHERE r.business_id=b.id)
+                  < MIN(?,COALESCE(NULLIF(b.reviews,0),?))
+            ORDER BY jr.rowid""", (job_id, cap, cap)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def upsert_business(data: dict, tag: tuple[str, str, str], job_id: str, path: Path = DB_PATH,
+                    *, store_details: bool = False, review_limit: int = 100,
+                    parse_run_id: str | None = None) -> bool:
     """Return True only for a new organization; never overwrite CRM fields."""
+    business_id = str(data.get("id") or "").strip()
+    if not business_id:
+        identity_text = normalized(data.get("name") or "") + "\0" + normalized(data.get("address") or "")
+        if identity_text == "\0":
+            raise ValueError("Для организации без внешнего ID нужны название и адрес")
+        business_id = "local:" + hashlib.sha256(identity_text.encode("utf-8")).hexdigest()[:32]
     with connection(path) as db:
-        exists = db.execute("SELECT 1 FROM businesses WHERE id=?", (data["id"],)).fetchone() is not None
+        exists = db.execute("SELECT 1 FROM businesses WHERE id=?", (business_id,)).fetchone() is not None
         db.execute("""INSERT INTO businesses
             (id,name,category,phones,socials,website,site_type,site_engine,rating,reviews,address,map_url,created_at,updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -249,20 +741,28 @@ def upsert_business(data: dict, tag: tuple[str, str, str], job_id: str, path: Pa
               socials=excluded.socials,website=excluded.website,site_type=excluded.site_type,
               site_engine=excluded.site_engine,rating=excluded.rating,reviews=excluded.reviews,
               address=excluded.address,map_url=excluded.map_url,updated_at=excluded.updated_at""",
-            (data["id"], data.get("name") or "Без названия", data.get("category"),
+            (business_id, data.get("name") or "Без названия", data.get("category"),
              json.dumps(data.get("phones", []), ensure_ascii=False),
              json.dumps(data.get("socials", []), ensure_ascii=False), data.get("website"),
              data["site_type"], data.get("site_engine"), data.get("rating"), data.get("reviews"),
-             data.get("address"), data["map_url"], now(), now()))
-        db.execute("INSERT OR IGNORE INTO business_tags VALUES (?,?,?,?)", (data["id"], *tag))
+             data.get("address"), normalize_yandex_url(data["map_url"]), now(), now()))
+        db.execute("INSERT OR IGNORE INTO business_tags VALUES (?,?,?,?)", (business_id, *tag))
         db.execute("UPDATE media_links SET business_id=? WHERE organization_id=? AND business_id IS NULL",
-                   (data["id"], data["id"]))
+                   (business_id, business_id))
+        if store_details:
+            _store_details(db, business_id, data, review_limit)
         if not exists:
-            db.execute("INSERT OR IGNORE INTO job_results VALUES (?,?)", (job_id, data["id"]))
+            db.execute("INSERT OR IGNORE INTO job_results VALUES (?,?)", (job_id, business_id))
+        if parse_run_id:
+            db.execute("INSERT OR IGNORE INTO parse_run_businesses VALUES (?,?,?)",
+                       (parse_run_id, business_id, now()))
+            db.execute("UPDATE parse_runs SET organization_count=(SELECT COUNT(*) FROM parse_run_businesses WHERE parse_run_id=?) WHERE id=?",
+                       (parse_run_id, parse_run_id))
         return not exists
 
 
-def refresh_business(data: dict, path: Path = DB_PATH) -> bool:
+def refresh_business(data: dict, path: Path = DB_PATH, *, store_details: bool = False,
+                     review_limit: int = 100) -> bool:
     """Update public fields only; CRM and search results stay untouched."""
     with connection(path) as conn:
         if not conn.execute("SELECT 1 FROM businesses WHERE id=?", (data["id"],)).fetchone():
@@ -273,7 +773,9 @@ def refresh_business(data: dict, path: Path = DB_PATH) -> bool:
              json.dumps(data.get("phones", []), ensure_ascii=False),
              json.dumps(data.get("socials", []), ensure_ascii=False), data.get("website"),
              data["site_type"], data.get("site_engine"), data.get("rating"), data.get("reviews"),
-             data.get("address"), data["map_url"], now(), data["id"]))
+             data.get("address"), normalize_yandex_url(data["map_url"]), now(), data["id"]))
+        if store_details:
+            _store_details(conn, data["id"], data, review_limit)
     return True
 
 
@@ -449,6 +951,7 @@ def business(business_id: str, path: Path = DB_PATH) -> dict | None:
         if not row:
             return None
         result = dict(row)
+        result["map_url"] = normalize_yandex_url(result["map_url"])
         result["phones"] = json.loads(result["phones"])
         result["socials"] = json.loads(result["socials"])
         suppression = db.execute("SELECT reason FROM suppressions WHERE business_id=?", (business_id,)).fetchone()
@@ -464,6 +967,45 @@ def business(business_id: str, path: Path = DB_PATH) -> dict | None:
         result["history"] = [dict(e) for e in db.execute(
             "SELECT old_status,new_status,changed_at FROM status_events WHERE business_id=? ORDER BY id DESC", (business_id,))]
         return result
+
+
+def business_full(business_id: str, path: Path = DB_PATH) -> dict | None:
+    """Desktop-only extended card; the shared business() shape remains unchanged."""
+    result = business(business_id, path)
+    if result is None:
+        return None
+    with connection(path) as conn:
+        details = conn.execute("SELECT * FROM business_details WHERE business_id=?", (business_id,)).fetchone()
+        result["details"] = dict(details) if details else {
+            "description": None, "latitude": None, "longitude": None, "photo_count": None,
+            "categories_json": "[]", "details_complete": 0, "reviews_complete": 0,
+            "requested_review_limit": 0,
+        }
+        result["details"]["categories"] = json.loads(result["details"].pop("categories_json", "[]"))
+        result["review_items"] = [dict(row) for row in conn.execute("""SELECT text,rating,review_date,
+            company_response FROM reviews WHERE business_id=? ORDER BY COALESCE(review_date,'') DESC,id DESC LIMIT 100""",
+            (business_id,))]
+        result["links"] = [dict(row) for row in conn.execute(
+            "SELECT type,url,label FROM links WHERE business_id=? ORDER BY type,url", (business_id,))]
+        result["hours"] = [dict(row) for row in conn.execute(
+            "SELECT weekday,opens,closes,is_closed,raw FROM hours WHERE business_id=? ORDER BY weekday,opens",
+            (business_id,))]
+        result["features"] = [dict(row) for row in conn.execute(
+            "SELECT name,value FROM features WHERE business_id=? ORDER BY name,value", (business_id,))]
+    return result
+
+
+def desktop_diagnostics_enabled(path: Path = DB_PATH) -> bool:
+    with connection(path) as conn:
+        row = conn.execute("SELECT value FROM desktop_settings WHERE key='debug_save_html'").fetchone()
+        return bool(row and row[0] == "1")
+
+
+def set_desktop_diagnostics_enabled(enabled: bool, path: Path = DB_PATH) -> bool:
+    with connection(path) as conn:
+        conn.execute("INSERT INTO desktop_settings(key,value) VALUES('debug_save_html',?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("1" if enabled else "0",))
+    return bool(enabled)
 
 
 def list_businesses(filters: dict, path: Path = DB_PATH, limit: int = 50, offset: int = 0) -> list[dict]:

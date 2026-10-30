@@ -15,6 +15,8 @@ STYLE = ROOT / "app" / "desktop_ui" / "style.css"
 HTML = ROOT / "app" / "desktop_ui" / "index.html"
 APP_JS = ROOT / "app" / "desktop_ui" / "app.js"
 FLOWS_JS = ROOT / "app" / "desktop_ui" / "flows.js"
+FOLDER_CSS = ROOT / "app" / "desktop_ui" / "glass-folder.css"
+FOLDER_JS = ROOT / "app" / "desktop_ui" / "glass-folder.js"
 FONT_DIR = ROOT / "app" / "desktop_ui" / "fonts"
 
 EXPECTED = {
@@ -90,13 +92,27 @@ def main() -> int:
         if actual != expected:
             errors.append(f"Token --{name}: expected {expected}, found {actual!r}")
 
-    outside_tokens = (STYLE, HTML, APP_JS, FLOWS_JS)
+    outside_tokens = (STYLE, HTML, APP_JS, FLOWS_JS, FOLDER_CSS, FOLDER_JS)
     literal_color = re.compile(
         r"#[0-9a-fA-F]{3,8}(?![0-9a-fA-F])|\b(?:rgba?|hsla?)\s*\("
     )
     for path in outside_tokens:
         if literal_color.search(path.read_text(encoding="utf-8")):
             errors.append(f"Hardcoded color found outside tokens: {path.relative_to(ROOT)}")
+
+    if 'href="glass-folder.css"' not in html_text:
+        errors.append("Glass folder stylesheet is not linked by the desktop page")
+    if '<script src="glass-folder.js"></script>' not in html_text:
+        errors.append("Glass folder behavior is not loaded by the desktop page")
+    folder_css = FOLDER_CSS.read_text(encoding="utf-8")
+    folder_js = FOLDER_JS.read_text(encoding="utf-8")
+    if ".glass-folder-card[data-open] .glass-folder-files" not in folder_css or "pointer-events: auto" not in folder_css:
+        errors.append("Opened folder files must accept pointer input")
+    for fragment in ("aria-expanded", "aria-hidden", "inert", "Escape", "IntersectionObserver", "prefers-reduced-motion"):
+        if fragment not in folder_js and fragment not in folder_css:
+            errors.append(f"Glass folder accessibility/performance support missing: {fragment}")
+    if "data-base-folder-run-city" not in flows_text or "dataset.baseFolderRunCity" not in flows_text:
+        errors.append("Recent runs in city folders must retain their city when opened")
 
     pairs = [
         ("Основной текст / фон приложения", "text-primary", "bg-primary", 4.5),
@@ -162,11 +178,8 @@ def main() -> int:
 
     accessible_fragments = [
         (app_text, 'aria-label="\\u0418\\u043c\\u044f', "business filter"),
-        (app_text, 'aria-label="\\u0422\\u0435\\u043a\\u0441\\u0442 \\u0448', "script editor"),
-        (app_text, 'aria-label="\\u0422\\u0435\\u043a\\u0441\\u0442 \\u0434', "campaign recipient message"),
-        (flows_text, 'aria-label="\\u041d\\u043e\\u043c\\u0435\\u0440', "phone check selector"),
-        (flows_text, 'aria-label="\\u041f\\u0440\\u0438\\u0447\\u0438\\u043d', "suppression reason"),
-        (flows_text, 'aria-label="\\u0422\\u0435\\u043a\\u0441\\u0442 \\u043f', "prepared script preview"),
+        (flows_text, 'aria-labelledby="telegram-links-title"', "telegram phone links panel"),
+        (flows_text, 'data-show-telegram-links', "telegram phone links action"),
     ]
     for text, fragment, label in accessible_fragments:
         if fragment not in text:

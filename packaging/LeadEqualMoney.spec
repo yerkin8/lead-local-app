@@ -3,8 +3,13 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 
-ROOT = Path(SPECPATH).resolve().parent
-datas = [(str(ROOT / "app" / "desktop_ui"), "app/desktop_ui")]
+SPEC_BASE = Path(SPECPATH).resolve()
+ROOT = next((candidate for candidate in (SPEC_BASE, SPEC_BASE.parent)
+             if (candidate / "app" / "desktop.py").is_file()), SPEC_BASE.parent)
+ICON = ROOT / "app" / "assets" / "lem-icon.ico"
+datas = [(str(ROOT / "app" / "desktop_ui"), "app/desktop_ui"),
+         (str(ROOT / "app" / "selectors.json"), "app"),
+         (str(ICON), "app/assets")]
 binaries = []
 hiddenimports = ["clr", "pythonnet"]
 
@@ -49,6 +54,6 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=True,
-    icon=str(ROOT / "assets" / "app.ico"),
+    icon=str(ICON),
     version=str(ROOT / "packaging" / "version_info.txt"),
 )
