@@ -151,7 +151,7 @@ async function mailingCampaignPage(node, o) {
     '<button type="button" class="btn" data-ml="refresh-campaign">Обновить статистику</button>',
     !c.counts.sent && c.status !== 'running' ? '<button type="button" class="ghost" data-ml="delete">Удалить</button>' : '',
   ].join('');
-  const goLive = !live ? `<form id="ml-live-form" class="ml-live"><div><strong>Реальная отправка выключена.</strong> Чтобы включить её осознанно, введите слово <code>${E(o.confirm_word)}</code>.${c.kind === 'normal' ? ' Сообщения получат настоящие организации.' : ' Сообщения получат только ваши тестовые адресаты.'}</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения"><button class="danger">Включить реальную отправку</button></form>` : '';
+  const goLive = !live ? `<form id="ml-live-form" class="ml-live"><div><strong>Реальная отправка выключена.</strong> Чтобы включить её осознанно, введите слово <code>${E(o.confirm_word)}</code>.${c.kind === 'normal' ? ' Сообщения получат настоящие организации.' : ' Сообщения получат только ваши тестовые адресаты.'}</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения" value="${E(state.mailingConfirm || '')}"><button class="danger">Включить реальную отправку</button></form>` : '';
   node.innerHTML = `${mlEmergency(o)}<section class="panel"><div class="panel-head"><div><span class="section-kicker">${E(ML.campaign[c.status] || c.status)}</span><h2>${E(c.title)}</h2><p>Создана ${E(mlTime(c.created_at))}${c.started_at ? ` · запуск ${E(mlTime(c.started_at))}` : ''}</p></div><div class="toolbar">${controls}</div></div>
       ${c.stop_reason ? `<div class="inline-note ${c.status === 'stopped' ? 'error-note' : ''}">${E(c.stop_reason)}</div>` : ''}${goLive}<div id="ml-stats">${mailingStats(c)}</div></section>
     <section class="panel"><h2>Получатели</h2><div class="list">${c.recipients.map(r => `<div class="row small"><div class="row-head"><div><span class="row-title">${E(r.business_name)}</span><div class="muted">${r.username ? (String(r.username).startsWith('+') || String(r.username).includes('•') ? E(r.username) : '@' + E(r.username)) : 'нет username'}${r.msg_id ? ` · сообщение № ${E(r.msg_id)}` : ''}${r.sent_at ? ` · ${E(mlTime(r.sent_at))}` : ''}</div></div>${mlChip(ML.recipient[r.status] || r.status, r.status === 'sent' ? 'green' : ['failed', 'unreachable'].includes(r.status) ? 'warn' : '')}</div>${r.reason ? `<div class="muted">${E(r.reason)}</div>` : ''}<details><summary>Текст</summary><pre class="ml-text">${E(r.message)}</pre></details></div>`).join('')}</div></section>`;
@@ -193,6 +193,7 @@ function mailingJournal(body, o) {
 document.addEventListener('input', event => {
   const form = event.target.closest?.('#ml-new-form');
   if (form) mailingCollect(form);
+  if (event.target.closest?.('#ml-live-form')) state.mailingConfirm = event.target.value;
 });
 document.addEventListener('change', event => {
   const form = event.target.closest?.('#ml-new-form');
@@ -224,7 +225,7 @@ document.addEventListener('click', event => {
       case 'dry': await call('mailing_run', id); toast('Сухой запуск завершён — ничего не отправлено'); render(); break;
       case 'run': if (!confirm('Начать реальную отправку?')) return; await call('mailing_run', id); toast('Отправка запущена'); render(); break;
       case 'pause': await call('mailing_pause', id); toast('Кампания на паузе'); render(); break;
-      case 'refresh-campaign': { const c = await call('mailing_detail', id); document.querySelector('#ml-stats').innerHTML = mailingStats(c); toast('Статистика обновлена'); break; }
+      case 'refresh-campaign': await render(); toast('Статистика обновлена'); break;
       case 'delete': if (!confirm('Удалить кампанию?')) return; await call('mailing_remove', id); state.mailingCampaign = null; render(); break;
     }
   });
@@ -241,7 +242,7 @@ document.addEventListener('submit', event => {
     else if (f.dataset.mlLoginCode) { const r = await call('mailing_login_code', f.dataset.mlLoginCode, x.get('code')); if (r.status === 'password_needed') state.mailingLogin[f.dataset.mlLoginCode] = {step: 'password'}; else { delete state.mailingLogin[f.dataset.mlLoginCode]; toast('Вход выполнен'); } render(); }
     else if (f.dataset.mlLoginPassword) { await call('mailing_login_password', f.dataset.mlLoginPassword, x.get('password')); delete state.mailingLogin[f.dataset.mlLoginPassword]; toast('Вход выполнен'); render(); }
     else if (f.id === 'ml-new-form') { const c = await call('mailing_new', mailingCollect(f)); toast('Кампания создана в режиме сухого запуска'); state.mailingDraft.title = ''; mlGo({mailingTab: 'campaigns', mailingCampaign: c.id}); }
-    else if (f.id === 'ml-live-form') { await call('mailing_go_live', state.mailingCampaign, x.get('confirm')); toast('Реальная отправка включена. Нажмите «Начать отправку»', true); render(); }
+    else if (f.id === 'ml-live-form') { await call('mailing_go_live', state.mailingCampaign, x.get('confirm')); state.mailingConfirm = ''; toast('Реальная отправка включена. Нажмите «Начать отправку»', true); render(); }
     else if (f.id === 'ml-stop-form') { await call('mailing_stop_add', x.get('kind'), x.get('value')); toast('Добавлено в стоп-лист'); render(); }
     else if (f.id === 'ml-policy-form') { const values = Object.fromEntries([...x.entries()].filter(([k]) => k !== 'weekdays_only').map(([k, v]) => [k, Number(v)])); values.weekdays_only = x.get('weekdays_only') === 'on'; await call('mailing_policy_save', values); toast('Правила сохранены'); render(); }
   });

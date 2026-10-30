@@ -187,8 +187,8 @@ class TelethonGateway(TelegramGateway):
 
     def _require(self, account_id):
         client = self._clients.get(account_id)
-        if not client:
-            raise GatewayError(gw.SESSION_INVALID, "not connected")
+        if not client:  # not a Telegram verdict about the account: reconnect, never quarantine
+            raise GatewayError(gw.NETWORK, "not connected")
         return client
 
     # messaging -----------------------------------------------------------

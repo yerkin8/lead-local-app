@@ -142,6 +142,11 @@ class Engine:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    async def forget_account(self, account_id: int) -> None:
+        """Logout: close the client and drop it from the connected set (next use reconnects)."""
+        self._connected.discard(account_id)
+        await self.gateway.disconnect(account_id)
+
     def _campaign_active(self, campaign_id: int) -> bool:
         if self.store.setting("emergency_stop", False):
             return False
@@ -166,6 +171,9 @@ class Engine:
         if not remaining and self._campaign_active(campaign_id):
             self._set_campaign(campaign_id, "done", "")
             self.store.event("done", "Кампания завершена", campaign_id=campaign_id)
+        elif remaining and self._campaign_active(campaign_id):
+            self._set_campaign(campaign_id, "paused", "Отправка прервана: аккаунт недоступен. Проверьте аккаунты и продолжите")
+            self.store.event("paused", "Отправка прервана, кампания на паузе", level="warning", campaign_id=campaign_id)
 
     def _set_campaign(self, campaign_id: int, status: str, reason: str, conn=None) -> None:
         sql = ("UPDATE campaigns SET status=?,stop_reason=?,updated_at=?,"
@@ -182,14 +190,16 @@ class Engine:
         network_failures = 0
         while self._campaign_active(campaign_id):
             account = self.store.row("SELECT * FROM accounts WHERE id=?", (account_id,))
-            if account and account["status"] == "paused" and parse(account["paused_until"])                     and parse(account["paused_until"]) <= self.clock():
+            paused_until = parse(account["paused_until"]) if account else None
+            if account and account["status"] == "paused" and paused_until and paused_until <= self.clock():
                 with self.store.tx() as conn:
                     conn.execute("UPDATE accounts SET status='active',status_reason='',paused_until=NULL "
                                  "WHERE id=? AND status='paused'", (account_id,))
                 self.store.event("resumed", "Пауза аккаунта закончилась", account_id=account_id)
                 continue
             if not account or account["status"] in ("quarantine", "needs_login"):
-                self._stop_for_account(account_id, account["status_reason"] if account else "Аккаунт удалён")
+                self._stop_for_account(account_id, account["status_reason"] if account else "Аккаунт удалён",
+                                       status="paused" if account and account["status"] == "needs_login" else "stopped")
                 return
             recipient = self.store.row(
                 "SELECT * FROM recipients WHERE campaign_id=? AND account_id=? AND status IN ('sending','queued') "
@@ -227,6 +237,8 @@ class Engine:
                     return
             except _AccountStopped:
                 return
+            except _Retry:
+                continue
 
     async def _wait_until(self, due: datetime, campaign_id: int) -> bool:
         while self.clock() < due:
@@ -306,13 +318,28 @@ class Engine:
     async def _ensure_connected(self, account_id: int) -> None:
         if account_id in self._connected:
             return
-        credentials = self.credentials(account_id)
+        try:
+            credentials = self.credentials(account_id)
+        except (GatewayError, ValueError) as error:
+            # No session (logged out) or no keys: the account needs a login, it is not restricted.
+            reason = "Нужен вход в аккаунт" if isinstance(error, GatewayError) else str(error)
+            with self.store.tx() as conn:
+                conn.execute("UPDATE accounts SET status='needs_login',status_reason=?,updated_at=? WHERE id=?",
+                             (reason, iso(self.clock()), account_id))
+                self.store.event("needs_login", reason, level="warning", account_id=account_id, conn=conn)
+            self._stop_for_account(account_id, reason, status="paused")
+            raise _AccountStopped() from None
         try:
             user_id = await self.gateway.connect(account_id, credentials.api_id, credentials.api_hash,
                                                  credentials.session)
         except GatewayError as error:
-            await self._handle_account_error(account_id, error)
-            raise _AccountStopped() from error
+            if error.kind in gw.QUARANTINE_KINDS:
+                await self._handle_account_error(account_id, error)
+                raise _AccountStopped() from error
+            if error.kind == gw.FLOOD_WAIT:
+                self._flood_wait(account_id, int(error.seconds or 60), None)
+                raise _Retry() from error
+            raise _NetworkTrouble() from error
         self._connected.add(account_id)
         with self.store.tx() as conn:
             conn.execute("UPDATE accounts SET tg_user_id=?,updated_at=? WHERE id=?",
@@ -411,6 +438,7 @@ class Engine:
     async def _handle_recipient_error(self, campaign, account_id, recipient, attempt_id, error: GatewayError):
         label = gw.KIND_LABELS.get(error.kind, error.kind)
         if error.kind == gw.NETWORK:
+            self._connected.discard(account_id)
             raise _NetworkTrouble()  # attempt stays 'sending' and is reconciled next time
         if error.kind == gw.FLOOD_WAIT:
             with self.store.tx() as conn:
@@ -472,14 +500,14 @@ class Engine:
             return
         self.store.event(error.kind, f"Ошибка подключения: {label}", level="error", account_id=account_id)
 
-    def _stop_for_account(self, account_id: int, reason: str) -> None:
+    def _stop_for_account(self, account_id: int, reason: str, status: str = "stopped") -> None:
         """Stop every running campaign that uses this account. Traffic is never moved elsewhere."""
         with self.store.tx() as conn:
             ids = [row[0] for row in conn.execute(
                 "SELECT DISTINCT c.id FROM campaigns c JOIN recipients r ON r.campaign_id=c.id "
                 "WHERE r.account_id=? AND c.status='running'", (account_id,))]
             for campaign_id in ids:
-                self._set_campaign(campaign_id, "stopped", reason, conn=conn)
+                self._set_campaign(campaign_id, status, reason, conn=conn)
                 self.store.event("campaign_stopped", reason, level="error", account_id=account_id,
                                  campaign_id=campaign_id, conn=conn)
 
@@ -512,4 +540,8 @@ class _NetworkTrouble(Exception):
 
 
 class _AccountStopped(Exception):
+    pass
+
+
+class _Retry(Exception):
     pass

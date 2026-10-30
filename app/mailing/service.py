@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
+import secrets
 import json
 import re
 import threading
@@ -182,11 +184,20 @@ class MailingService:
             secret["session"] = session
             write_secret(self._account_path(account_id), secret)
 
+    def _salt(self) -> bytes:
+        """Random per-install secret (DPAPI-encrypted) so phone_key cannot be reversed by brute force."""
+        path = self.dir / "salt.bin"
+        data = read_secret(path)
+        if not data:
+            data = {"salt": secrets.token_hex(32)}
+            write_secret(path, data)
+        return bytes.fromhex(data["salt"])
+
     def add_account(self, label: str, phone: str, is_test: bool, expected_id: int | None = None) -> dict:
         digits = re.sub(r"\D", "", str(phone))
         if not 10 <= len(digits) <= 15:
             raise ValueError("Телефон укажите в международном формате, например +7…")
-        key = hashlib.sha256(digits.encode()).hexdigest()
+        key = hmac.new(self._salt(), digits.encode(), hashlib.sha256).hexdigest()
         existing = self.store.row("SELECT id FROM accounts WHERE phone_key=?", (key,))
         if existing:
             return {"id": existing["id"], "created": False}
@@ -244,8 +255,10 @@ class MailingService:
                                 "WHERE r.account_id=? AND c.status='running'", (account_id,))
         if busy:
             raise ValueError("Аккаунт участвует в запущенной кампании. Сначала остановите её")
-        self.engine.call(self.gateway.disconnect(account_id), timeout=30)
-        self._account_path(account_id).unlink(missing_ok=True)
+        self.engine.call(self.engine.forget_account(account_id), timeout=30)
+        secret = read_secret(self._account_path(account_id)) or {}
+        secret.pop("session", None)  # keep the phone so the owner can log in again
+        write_secret(self._account_path(account_id), secret)
         with self.store.tx() as conn:
             conn.execute("UPDATE accounts SET status='needs_login',status_reason='Сессия удалена',tg_user_id=NULL "
                          "WHERE id=?", (account_id,))

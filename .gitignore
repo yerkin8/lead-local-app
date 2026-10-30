@@ -143,3 +143,7 @@ LeadGen Base/
 !app/assets/lem-icon.png
 !app/assets/lem-icon.ico
 /Чек-лист по нейро-визуалу.pdf
+
+# Telegram mailing: owner's keys, phones and test recipients. Never commit or ship.
+# Only the empty examples are tracked (added with git add -f).
+secrets/

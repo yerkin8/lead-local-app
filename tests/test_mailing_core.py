@@ -499,6 +499,62 @@ class SecretsTests(MailingCase):
             self.assertNotIn(secret, text)
 
 
+class ConnectionTests(MailingCase):
+    """Review defects: a campaign must never stay 'running' without a task; logout is not quarantine."""
+
+    def test_network_on_connect_pauses_campaign_not_stuck(self):
+        account = self.account()
+        campaign = self.service.create_campaign("Тест", {}, TEMPLATE, [account], limit=2)
+        self.fake.fail("connect", str(account), GatewayError(gw.NETWORK, "timeout"), times=3)
+        result = self.live(campaign["id"])
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(self.service.store.value("SELECT status FROM accounts WHERE id=?", (account,)), "active")
+        self.service.mark_running(campaign["id"])  # can be continued
+        asyncio.run(self.service.engine.run_campaign(campaign["id"]))
+        self.assertEqual(self.service.campaign(campaign["id"])["counts"]["sent"], 2)
+
+    def test_flood_wait_on_connect_waits_then_sends(self):
+        account = self.account()
+        campaign = self.service.create_campaign("Тест", {}, TEMPLATE, [account], limit=1)
+        self.fake.fail("connect", str(account), GatewayError(gw.FLOOD_WAIT, "FLOOD_WAIT", 60))
+        result = self.live(campaign["id"])
+        self.assertEqual(result["counts"]["sent"], 1)
+        self.assertEqual(result["status"], "done")
+
+    def test_missing_session_means_login_not_quarantine(self):
+        account = self.account()
+        self.service._account_path(account).unlink()
+        campaign = self.service.create_campaign("Тест", {}, TEMPLATE, [account], limit=1)
+        result = self.live(campaign["id"])
+        row = self.service.store.row("SELECT * FROM accounts WHERE id=?", (account,))
+        self.assertEqual(row["status"], "needs_login")
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(self.fake.delivered, [])
+
+    def test_logout_then_login_reconnects_without_quarantine(self):
+        account = self.account()
+        first = self.service.create_campaign("1", {}, TEMPLATE, [account], limit=1)
+        self.live(first["id"])
+        self.service.start()
+        try:
+            self.service.remove_account(account)
+            self.assertNotIn(account, self.service.engine._connected)
+            self.service.login_start(account)
+            self.assertEqual(self.service.login_code(account, self.fake.login_code)["status"], "authorized")
+        finally:
+            self.service.shutdown(10)
+        second = self.service.create_campaign("2", {}, TEMPLATE, [account], limit=2)
+        result = self.live(second["id"])
+        self.assertEqual(self.service.store.value("SELECT status FROM accounts WHERE id=?", (account,)), "active")
+        self.assertEqual(result["counts"]["sent"], 1)  # b1 already written to in campaign 1
+
+    def test_phone_key_is_salted(self):
+        import hashlib
+        account = self.account()
+        key = self.service.store.value("SELECT phone_key FROM accounts WHERE id=?", (account,))
+        self.assertNotEqual(key, hashlib.sha256(PHONE_A[1:].encode()).hexdigest())
+
+
 class ParsingTests(unittest.TestCase):
     def test_username_extraction(self):
         self.assertEqual(username_from_business({"socials": [{"url": "https://t.me/joinchat/abc"},

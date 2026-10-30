@@ -166,7 +166,7 @@ def tour(window, service: MailingService):
         wait("document.querySelector('[data-ml=dry]')")
         step("Кампания создана (сухой запуск)", "06_campaign_draft.png")
         click("[data-ml=dry]")
-        wait("document.querySelector('#ml-live-form') && document.querySelector('.ml-metrics')")
+        wait("document.querySelector('[data-metric=\"Сухой запуск\"] strong')?.textContent!=='0'")
         campaign_id = js("state.mailingCampaign")
         counts = service.campaign(campaign_id)["counts"]
         shown = js("Object.fromEntries([...document.querySelectorAll('.ml-metrics .metric')].map(m=>[m.dataset.metric,Number(m.querySelector('strong').textContent)]))")

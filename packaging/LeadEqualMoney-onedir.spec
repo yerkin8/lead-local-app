@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules, copy_metadata
 
 
 SPEC_BASE = Path(SPECPATH).resolve()
@@ -20,6 +20,9 @@ for package in ("webview", "clr_loader", "pythonnet"):
     hiddenimports += package_hidden
 
 hiddenimports += collect_submodules("telethon")
+# Mailing: recipient time zones (zoneinfo needs tzdata on Windows) and the mailing package.
+datas += collect_data_files("tzdata")
+hiddenimports += ["tzdata"] + collect_submodules("app.mailing")
 hiddenimports += collect_submodules("selenium")
 datas += copy_metadata("pywebview")
 datas += copy_metadata("Telethon")
