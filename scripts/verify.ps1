@@ -28,8 +28,9 @@ Run-Check 'Тест динамических разделов галереи des
 Run-Check 'Тест иерархии запусков базы desktop Stage 5' { & $Python -m unittest tests.test_parse_runs -v }
 Run-Check 'Нормализация ссылок Яндекса Stage 9' { & $Python -m unittest tests.test_yandex_urls -v }
 Run-Check 'Тест данных превью папок Stage 6' { & $Python -m unittest tests.test_folder_preview_data -v }
-Run-Check 'Отсутствие авторизации и рассылки в desktop UI' { & $Python scripts\check_desktop_telegram_surface.py }
-Run-Check 'Компиляция backend-парсера и моста' { & $Python -m compileall -q app\db.py app\lead_parser.py app\desktop_gallery.py app\media_service.py app\desktop_services.py app\desktop.py }
+Run-Check 'Ядро рассылки Telegram на FakeGateway' { & $Python -m unittest tests.test_mailing_core tests.test_mailing_bridge -v }
+Run-Check 'Старый интерфейс Telegram отключён, рассылка только в app/mailing' { & $Python scripts\check_desktop_telegram_surface.py }
+Run-Check 'Компиляция backend-парсера и моста' { & $Python -m compileall -q app\db.py app\lead_parser.py app\desktop_gallery.py app\media_service.py app\desktop_services.py app\desktop.py app\mailing }
 Run-Check 'Синтаксис JavaScript desktop' {
   node --check app\desktop_ui\activity-poller.js
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -40,6 +41,8 @@ Run-Check 'Синтаксис JavaScript desktop' {
   node --check app\desktop_ui\stage9.js
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   node --check app\desktop_ui\glass-folder.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\mailing.js
 }
 Run-Check 'Запрет автопереходов и отдельных интервалов' { & $Python scripts\check_refresh_sources.py }
 Run-Check 'Токены, контраст и локальные шрифты desktop' { & $Python scripts\check_desktop_theme.py --report verification\design\theme-static-check.txt }

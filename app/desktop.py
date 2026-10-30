@@ -248,6 +248,7 @@ from .desktop_services import (LocalWorker, backup_database, export_xlsx, import
                                import_sqlite, refresh_business, search_results,
                                start_desktop_search)
 from .domain import COUNTRIES, SITE_TYPES, STATUSES
+from .mailing.desktop_bridge import MailingBridgeMixin
 
 
 def _configure_logging() -> None:
@@ -268,8 +269,10 @@ def _configure_logging() -> None:
     threading.excepthook = lambda args: on_error(args.exc_type, args.exc_value, args.exc_traceback)
 
 
-class Bridge:
-    """Explicit operations only; the browser has no filesystem or secret-reading API."""
+class Bridge(MailingBridgeMixin):
+    """Explicit operations only; the browser has no filesystem or secret-reading API.
+
+    Telegram mailing methods (mailing_*) come from MailingBridgeMixin; secrets never reach the page."""
 
     def __init__(self):
         self._window = None
@@ -290,6 +293,7 @@ class Bridge:
                                      "site_types": sorted(SITE_TYPES), "data_dir": str(DATA_DIR),
                                      "stats": db.stats(),
                                      "telegram_mtproto_enabled": TELEGRAM_MTPROTO_ENABLED,
+                                     "mailing_available": self._mailing is not None,
                                      "first_run": not (DATA_DIR / "first_run_complete").exists(),
                                      "version": APP_VERSION,
                                      "migration_notice": DATA_MIGRATION_NOTICE})
@@ -530,8 +534,15 @@ def main():
         with single_instance():
             db.init_desktop_db()
             worker = LocalWorker()
+            bridge = Bridge()
             try:
-                bridge = Bridge()
+                from .mailing.desktop_bridge import create_service
+                bridge._mailing = create_service(DATA_DIR)
+                bridge._mailing.start()
+            except Exception:
+                bridge._mailing = None
+                logger.exception("Модуль рассылки не запустился; остальное приложение работает")
+            try:
                 page_path = resource_path("app/desktop_ui/index.html")
                 icon_path = resource_path("app/assets/lem-icon.ico")
                 if not page_path.is_file():
@@ -634,6 +645,8 @@ def main():
             finally:
                 if geometry_store:
                     geometry_store.flush()
+                if bridge._mailing is not None:
+                    logger.info("Mailing shutdown: %s", bridge._mailing.shutdown(15))
                 worker_stopped = worker.shutdown(timeout=50)
                 logger.info("Shutdown complete: worker=%s", worker_stopped)
                 if not worker_stopped:

@@ -1,0 +1,17 @@
+/* «Рассылка» — only project tokens from lem.css. */
+.ml-emergency { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.ml-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.ml-tabs { margin: 0 0 14px; }
+.ml-form { display: grid; gap: 12px; margin-top: 14px; }
+.ml-check { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); }
+.ml-login { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.ml-live { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0; padding: 12px;
+  border: 1px solid var(--warning-border); background: var(--warning-bg); color: var(--warning-text); border-radius: 10px; }
+.ml-live input { width: 160px; }
+.ml-text { white-space: pre-wrap; font-family: inherit; margin: 8px 0 0; padding: 10px; border-radius: 8px;
+  background: var(--bg-hover); color: var(--text-primary); }
+.ml-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ml-table th, .ml-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.ml-table th { color: var(--text-secondary); font-weight: 600; }
+.ml-metrics { margin: 14px 0; }
+.content h3 { margin: 16px 0 8px; font-size: 14px; }

@@ -260,8 +260,9 @@ class Engine:
             if already:
                 return "skipped", "already_sent", "Этой организации уже писали"
         if account["is_test"] and username not in self.test_recipients():
-            self.store.event("test_guard", "Тестовый аккаунт может писать только тестовым адресатам",
-                             level="warning", account_id=account["id"], campaign_id=campaign["id"])
+            if not self.store.value("SELECT 1 FROM events WHERE kind='test_guard' AND campaign_id=?", (campaign["id"],)):
+                self.store.event("test_guard", "Тестовый аккаунт может писать только тестовым адресатам",
+                                 level="warning", account_id=account["id"], campaign_id=campaign["id"])
             return "skipped", "test_guard", "Тестовый аккаунт пишет только тестовым адресатам"
         if not username:
             return "skipped", "no_contact", "Нет username Telegram"

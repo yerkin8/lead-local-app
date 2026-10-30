@@ -74,7 +74,12 @@ def main() -> int:
 
     print("Desktop Telegram surface check: PASS")
     print(f"UI files checked: {len(UI_PATHS)}")
-    print("MTProto default-off; authorization, sessions, campaigns, consent and send-limit UI absent")
+    mailing_ui = (ROOT / "app" / "desktop_ui" / "mailing.js").read_text(encoding="utf-8")
+    for marker in RETIRED_UI_MARKERS:
+        if marker in mailing_ui:
+            print(f"- retired UI marker in mailing.js: {marker}")
+            return 1
+    print("Legacy single-account Telegram UI (telegram_sender) absent; MTProto lives only in app/mailing")
     print("Phone links are generated locally; external opening is routed through the desktop bridge")
     return 0
 

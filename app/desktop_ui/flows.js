@@ -432,7 +432,7 @@ function showFirstRunWizard() {
     <span class="section-kicker">ПЕРВЫЙ ЗАПУСК · ${E(state.config.version)}</span>
     <h2 id="setup-title">Добро пожаловать в LeadEqualMoney</h2>
     <p>Приложение работает локально: можно вести базу, искать организации и собирать медиа.</p>
-    <div class="inline-note"><strong>Telegram не подключается.</strong> Кнопка «Проверить ТГ» только формирует ссылки из номеров карточки. Она не проверяет наличие аккаунта, не запрашивает контакты, не отправляет сообщения и не требует API ID или API hash.</div>
+    <div class="inline-note"><strong>Telegram подключается только в разделе «Рассылка».</strong> Там вы вводите свои api_id и api_hash и входите в свой аккаунт; ключи и сессии шифруются и не покидают этот компьютер. Кнопка «Проверить ТГ» только формирует ссылки из номеров карточки и ключей не требует.</div>
     <p class="small muted">Папка данных: ${E(state.config.data_dir)}</p>
     <div class="toolbar"><button class="btn primary" type="button" data-setup-continue>Начать работу</button></div>
   </section>`;
@@ -448,7 +448,7 @@ async function finishFirstRun(button) {
     state.config.first_run = false;
     const dialog = button.closest('dialog');
     dialog?.close(); dialog?.remove();
-    toast('Готово. Приложение не подключается к Telegram.');
+    toast('Готово. Рассылка в Telegram — в разделе «Рассылка».');
   } catch (error) {
     toast(error.message || 'Не удалось завершить настройку.', true);
   }
