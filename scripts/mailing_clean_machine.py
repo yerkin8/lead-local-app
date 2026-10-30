@@ -26,6 +26,19 @@ PORT = 9339
 TEST_ID, TEST_HASH, TEST_PHONE = "12345678", "a" * 32, "+79990000000"
 
 
+def window_responding(samples: int = 5) -> bool:
+    """Windows' own «не отвечает» test (IsHungAppWindow) on the app window, sampled for a few seconds."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    user32.FindWindowW.restype = ctypes.c_void_p
+    results = []
+    for _ in range(samples):
+        hwnd = user32.FindWindowW(None, "LeadEqualMoney")
+        results.append(bool(hwnd) and not user32.IsHungAppWindow(ctypes.c_void_p(hwnd)))
+        time.sleep(1)
+    return all(results)
+
+
 class Page:
     def __init__(self):
         import websocket
@@ -89,6 +102,7 @@ def main(zip_path: Path) -> int:
         page = Page()
         page.wait("typeof state!=='undefined' && state.config")
         report["checks"]["window_started_without_terminal"] = True
+        report["checks"]["window_responding"] = window_responding()
         page.wait("document.querySelector('#first-run-dialog [data-setup-continue]')")
         page.shot("01_app_first_run.png")
         page.js("document.querySelector('#first-run-dialog [data-setup-continue]').click()")

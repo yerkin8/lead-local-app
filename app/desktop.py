@@ -578,11 +578,21 @@ def main():
                     if not icon_path.is_file():
                         logger.warning("Файл значка окна не найден: %s", icon_path)
                         return
+                    # The "shown" handler runs in a worker thread. Setting Form.Icon from here is a
+                    # synchronous cross-thread SendMessage made while holding the GIL, and the UI
+                    # thread may be waiting for that GIL in on_shown -> deadlock ("не отвечает").
+                    # BeginInvoke queues the work on the UI thread and returns at once.
+                    def set_icon():
+                        try:
+                            from System.Drawing import Icon
+                            icon = Icon(str(icon_path))
+                            window.native.Icon = icon
+                            icon_references.append(icon)
+                        except Exception:
+                            logger.exception("Не удалось установить значок заголовка окна")
                     try:
-                        from System.Drawing import Icon
-                        icon = Icon(str(icon_path))
-                        window.native.Icon = icon
-                        icon_references.append(icon)
+                        from System import Action
+                        window.native.BeginInvoke(Action(set_icon))
                     except Exception:
                         logger.exception("Не удалось установить значок заголовка окна")
 
