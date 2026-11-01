@@ -53,7 +53,9 @@ print(json.dumps({'first':a,'second':b,'item':item},ensure_ascii=False))
                                 "map_url": "https://yandex.ru/maps/org/studio/456/"},
                                ("студия", "Россия", "Казань"), job_id, source)
             db.set_business("456", "waiting", "Позвонил вчера", source)
-            db.save_template("short", "Мой личный текст", source)
+            with db.connection(source) as conn:  # an edited script under its old flat slug (schema v5)
+                conn.execute("""INSERT INTO templates(slug,title,body,updated_at,origin)
+                    VALUES ('quick_no_site','Быстрое · без сайта','Мой личный текст','x','builtin')""")
             db.set_suppression("456", True, "Попросили не писать", source)
             code = """
 import json,sys
@@ -65,7 +67,7 @@ second=import_sqlite(sys.argv[1])
 item=db.business('456')
 exported=export_xlsx(sys.argv[2])
 print(json.dumps({'first':first,'second':second,'item':item,
-  'template':next(x['body'] for x in db.templates() if x['slug']=='short'),
+  'template':next(x['body'] for x in db.templates() if x['slug']=='site.first'),
   'exported':exported},ensure_ascii=False))
 """
             env = {**os.environ, "DATA_DIR": str(data_dir)}

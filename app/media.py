@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 
 from .config import MEDIA_DIR, MIN_FREE_BYTES
 from .driver_registry import quit_driver
+from .errors import YandexBlocked
 from .domain import org_id
 from .lead_parser import SearchStopped, localized_url, request_page
 from .yandex_urls import normalize_yandex_url
@@ -24,6 +25,10 @@ MAX_ZIP_BYTES = 45 * 1024 * 1024
 
 class MediaError(RuntimeError):
     pass
+
+
+class MediaBlocked(MediaError, YandexBlocked):
+    """Captcha or rate limit while collecting media."""
 
 
 def validate_org_url(url: str) -> str:
@@ -87,9 +92,11 @@ def _result_directory(job: dict, business_name: str, work: Path) -> tuple[Path, 
     return destination, len(files), size
 
 
-def split_archives(folder: Path, files: list[Path], *, include_menu: bool = False) -> list[Path]:
-    """Produce valid, independent ZIP files with relative paths."""
-    menu = folder / "work" / "menu.md"
+def split_archives(folder: Path, files: list[Path], *, include_menu: bool = False,
+                   base: Path | None = None) -> list[Path]:
+    """Produce valid, independent ZIP files in ``folder`` with paths relative to ``base``."""
+    base = base or folder / "work"
+    menu = base / "menu.md"
     payload = [f for f in files if f.is_file() and f != menu]
     if not payload and not include_menu:
         raise MediaError("Не найдено файлов для архива")
@@ -120,7 +127,7 @@ def split_archives(folder: Path, files: list[Path], *, include_menu: bool = Fals
             if include_menu and menu.exists():
                 archive.write(menu, "menu.md")
             for file in items:
-                archive.write(file, file.relative_to(folder / "work").as_posix())
+                archive.write(file, file.relative_to(base).as_posix())
         if target.stat().st_size > 50 * 1024 * 1024:
             target.unlink(missing_ok=True)
             raise MediaError("Архив превысил лимит Telegram")

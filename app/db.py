@@ -11,6 +11,8 @@ from pathlib import Path
 
 from .config import DB_PATH
 from .domain import STATUSES, normalized, org_id
+from . import script_templates as scripts
+from .script_legacy import V5_TEMPLATES
 from .script_templates import TEMPLATES
 from .yandex_urls import normalize_yandex_url
 
@@ -20,7 +22,23 @@ def now() -> str:
 
 
 DETAILS_SCHEMA_VERSION = 1
-DESKTOP_SCHEMA_VERSION = 3
+# 7: Desktop LeadEqualMoney with the Mini App mechanics (same tables as 6; the number guarantees a backup
+#    for desktop bases that already carry a different «4» from an old branch); 6: script categories;
+#    5: templates.origin; 4: «Сегодня».
+DESKTOP_SCHEMA_VERSION = 7
+
+
+class SchemaTooNew(RuntimeError):
+    """The base was written by a newer app: opening it here could break it."""
+
+
+def ensure_known_schema(path: Path) -> None:
+    """Refuse a base from a newer app before any backup, migration or import touches it."""
+    exists, version = _schema_state(path)
+    if exists and version > DESKTOP_SCHEMA_VERSION:
+        raise SchemaTooNew(
+            f"База создана более новой версией приложения (схема {version}, эта версия понимает до "
+            f"{DESKTOP_SCHEMA_VERSION}). Обновите LeadEqualMoney, база не изменена.")
 
 
 def _schema_state(path: Path) -> tuple[bool, int]:
@@ -83,26 +101,94 @@ def connection(path: Path = DB_PATH):
         db.close()
 
 
-LEGACY_TEMPLATES = {
-    "first": ("Первое сообщение", "Здравствуйте! Меня зовут [ваше имя]. Увидел {название} в {город}. Занимаюсь сайтами для бизнеса в сфере «{ниша}». Можно задам пару вопросов о том, как к вам сейчас приходят новые клиенты?"),
-    "short": ("Короткое сообщение", "Здравствуйте! Увидел {название} в {город}. Помогаю бизнесам в сфере «{ниша}» с сайтом и заявками. Актуально обсудить?"),
-    "detailed": ("Подробное сообщение", "Здравствуйте! Я занимаюсь сайтами для бизнеса. Обратил внимание на {название}: по открытым данным {тип_сайта}. Могу предложить несколько вариантов, как удобнее представить услуги и принимать заявки. Если интересно, пришлю короткие идеи без обязательств."),
-    "call": ("Скрипт звонка", "Здравствуйте! Меня зовут [ваше имя]. Подскажите, удобно 30 секунд? Увидел {название} и хотел узнать, кто у вас отвечает за сайт и привлечение заявок. Я могу предложить идеи для вашей сферы."),
-    "followup": ("Повторное сообщение", "Здравствуйте! Возвращаюсь к сообщению о сайте для {название}. Если тема сейчас неактуальна, просто дайте знать — не буду отвлекать."),
-    "secretary_message": ("Сообщение секретарю", "Здравствуйте! Подскажите, кому в {название} лучше направить короткое предложение по сайту и приёму заявок?"),
-    "secretary_call": ("Звонок секретарю", "Здравствуйте! Подскажите, кто у вас принимает решения по сайту и маркетингу? Хотел бы адресовать предложение конкретному человеку."),
-    "meeting": ("Предложение на созвон", "Если вам удобно, можем созвониться на 15 минут и обсудить задачи {название}. Какое время вам подходит?"),
-    "payment": ("Договориться об оплате", "Чтобы согласовать оплату, я пришлю состав работ, сроки и сумму. Подскажите, какой формат документов вам удобен?"),
-    "deal": ("Сделка и следующие шаги", "Зафиксирую наши договорённости: [объём], [сроки], [стоимость]. Следующий шаг — [действие]. Всё верно?"),
-    "nudge": ("Мягко подтолкнуть", "Здравствуйте! Хотел уточнить, успели ли вы посмотреть предложение для {название}. Если остались вопросы, с радостью отвечу."),
-    "packages": ("Три пакета услуг", "Могу предложить три варианта: базовый — [состав], стандарт — [состав], расширенный — [состав]. Подберём исходя из ваших задач и бюджета."),
-    "prepayment": ("Объяснить предоплату", "Предоплата закрепляет время на проект и покрывает стартовые работы. В договоре зафиксируем этапы, сроки и результат каждого этапа."),
-    "upsell": ("Новая услуга бывшему клиенту", "Здравствуйте! После нашего проекта у меня появилась идея, которая может быть полезна {название}: [идея]. Если интересно, кратко расскажу."),
-    "expensive": ("Возражение: дорого", "Понимаю. Давайте уточним, какие задачи для вас главные, и я предложу объём работ под ваш бюджет без лишних функций."),
-    "existing_vendor": ("Возражение: есть исполнитель", "Понимаю. Хорошо, что задача уже в работе. Если понадобится независимый взгляд или помощь с отдельным этапом, буду рад подключиться."),
-    "not_needed": ("Возражение: не нужно", "Понял. Спасибо за ответ. Если ситуация изменится, можно будет вернуться к разговору."),
-    "thinking": ("Возражение: надо подумать", "Конечно. Подскажите, какая информация поможет принять решение? Могу коротко уточнить сроки, результат и стоимость."),
+from .script_legacy import LEGACY_TEMPLATES  # noqa: E402,F401  (re-export for old tests)
+
+
+# Script taxonomy columns (docs/rewrite/TAXONOMY.md §5). default_hash is the hash of the shipped
+# text the row started from: a body with a different hash was edited by the user and is kept.
+TEMPLATE_COLUMNS = {
+    "category": "TEXT NOT NULL DEFAULT ''", "stage": "TEXT NOT NULL DEFAULT ''",
+    "subtype": "TEXT NOT NULL DEFAULT ''", "sort": "INTEGER NOT NULL DEFAULT 0",
+    "default_hash": "TEXT NOT NULL DEFAULT ''",
 }
+
+
+def _legacy_defaults(slug: str) -> set[str]:
+    return {table[slug][1] for table in (V5_TEMPLATES, LEGACY_TEMPLATES) if slug in table}
+
+
+def _free_slug(db, base: str) -> str:
+    slug, index = base, 2
+    while db.execute("SELECT 1 FROM templates WHERE slug=?", (slug,)).fetchone():
+        slug, index = f"{base}_{index}", index + 1
+    return slug
+
+
+def _migrate_legacy_templates(db) -> None:
+    """Old flat slugs → category slugs. Idempotent: does nothing once no old slug is left.
+
+    Only the primary old slug of a new place is renamed into it, so its user edit survives.
+    Another old slug mapped there (e.g. the bracketed `first` → one-tap `site.first`) is dropped
+    when untouched, or kept as the user's own copy («Ваша правка») when edited.
+    Campaigns follow the script to wherever it went.
+    """
+    for old, new in scripts.LEGACY_SLUGS.items():
+        destination = new
+        row = db.execute("SELECT * FROM templates WHERE slug=? AND origin='builtin'", (old,)).fetchone()
+        if row:
+            untouched = row["body"] in _legacy_defaults(old)
+            taken = db.execute("SELECT 1 FROM templates WHERE slug=?", (new,)).fetchone()
+            if scripts.is_primary_legacy(old) and not taken:
+                shipped = row["body"] if untouched else V5_TEMPLATES.get(old, ("", ""))[1]
+                db.execute("UPDATE templates SET slug=?,default_hash=? WHERE slug=?",
+                           (new, scripts.body_hash(shipped), old))
+            elif untouched:
+                db.execute("DELETE FROM templates WHERE slug=?", (old,))
+            else:
+                category, stage, subtype = scripts.parse_slug(new)
+                destination = _free_slug(db, f"custom_{old}")
+                db.execute("""UPDATE templates SET slug=?,title=?,origin='custom',category=?,stage=?,subtype=?,
+                    default_hash='' WHERE slug=?""",
+                           (destination, f"Ваша правка · {row['title']}"[:60], category, stage, subtype, old))
+        db.execute("UPDATE campaigns SET template_slug=? WHERE template_slug=?", (destination, old))
+
+
+def sync_builtin_templates(target, texts: dict | None = None, *, overwrite_edited: bool = False) -> None:
+    """Insert shipped scripts and refresh untouched ones; `target` is a connection or a database path."""
+    if not isinstance(target, sqlite3.Connection):
+        with connection(Path(target)) as db:
+            sync_builtin_templates(db, texts, overwrite_edited=overwrite_edited)
+        return
+    db = target
+    for slug, (title, body) in (TEMPLATES if texts is None else texts).items():
+        category, stage, subtype = scripts.parse_slug(slug)
+        sort = scripts.sort_key(category, stage, subtype)
+        shipped = scripts.body_hash(body)
+        row = db.execute("SELECT body,default_hash FROM templates WHERE slug=?", (slug,)).fetchone()
+        if not row:
+            db.execute("""INSERT INTO templates(slug,title,body,updated_at,origin,category,stage,subtype,sort,default_hash)
+                VALUES (?,?,?,?,'builtin',?,?,?,?,?)""", (slug, title, body, now(), category, stage, subtype, sort, shipped))
+            continue
+        untouched = scripts.body_hash(row["body"]) == row["default_hash"] or row["body"] == body
+        if (untouched or overwrite_edited) and (row["body"] != body or row["default_hash"] != shipped):
+            db.execute("UPDATE templates SET body=?,default_hash=?,updated_at=? WHERE slug=?",
+                       (body, shipped, now(), slug))
+        db.execute("""UPDATE templates SET title=?,origin='builtin',category=?,stage=?,subtype=?,sort=?
+            WHERE slug=?""", (title, category, stage, subtype, sort, slug))
+
+
+def _migrate_templates(db) -> None:
+    _migrate_legacy_templates(db)
+    sync_builtin_templates(db)
+    # Scripts that are not shipped (AI, user copies, unknown slugs from old backups): place them in a group.
+    for row in db.execute("SELECT slug,category,stage,subtype,origin FROM templates").fetchall():
+        if row["origin"] == "builtin" and row["slug"] in TEMPLATES:
+            continue
+        meta = scripts.parse_slug(row["slug"])
+        category, stage, subtype = meta if meta else (
+            row["category"] if row["category"] in scripts.CATEGORIES else "general", row["stage"], row["subtype"])
+        db.execute("UPDATE templates SET category=?,stage=?,subtype=?,sort=? WHERE slug=?",
+                   (category, stage, subtype, scripts.sort_key(category, stage, subtype), row["slug"]))
 
 
 def init_db(path: Path = DB_PATH) -> None:
@@ -198,6 +284,9 @@ def init_db(path: Path = DB_PATH) -> None:
         CREATE INDEX IF NOT EXISTS idx_tags_place ON business_tags(country,city,niche);
         CREATE INDEX IF NOT EXISTS idx_media_org ON media_links(organization_id);
         """)
+        db.execute("""CREATE TABLE IF NOT EXISTS admins (
+            telegram_id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT '',
+            added_by INTEGER, created_at TEXT NOT NULL)""")
         columns = {row[1] for row in db.execute("PRAGMA table_info(campaign_recipients)")}
         if "telegram_id" not in columns:
             db.execute("ALTER TABLE campaign_recipients ADD COLUMN telegram_id TEXT")
@@ -210,6 +299,13 @@ def init_db(path: Path = DB_PATH) -> None:
         campaign_columns = {row[1] for row in db.execute("PRAGMA table_info(campaigns)")}
         if "error" not in campaign_columns:
             db.execute("ALTER TABLE campaigns ADD COLUMN error TEXT")
+        template_columns = {row[1] for row in db.execute("PRAGMA table_info(templates)")}
+        if "origin" not in template_columns:
+            # 'builtin' for the shipped scripts (also when the user edited them), 'ai' for saved AI chat results.
+            db.execute("ALTER TABLE templates ADD COLUMN origin TEXT NOT NULL DEFAULT 'builtin'")
+        for column, kind in TEMPLATE_COLUMNS.items():
+            if column not in template_columns:
+                db.execute(f"ALTER TABLE templates ADD COLUMN {column} {kind}")
         # Link media jobs created by the old bot when their Yandex ID is available.
         for row in db.execute("""SELECT j.id,j.params FROM jobs j LEFT JOIN media_links m ON m.job_id=j.id
                                WHERE j.kind IN ('images','products') AND m.job_id IS NULL"""):
@@ -223,18 +319,12 @@ def init_db(path: Path = DB_PATH) -> None:
                            (row["id"], identity, business_id[0] if business_id else None))
         db.execute("""UPDATE media_links SET business_id=organization_id WHERE business_id IS NULL
             AND organization_id IN (SELECT id FROM businesses)""")
-        for slug, (title, body) in TEMPLATES.items():
-            db.execute("INSERT OR IGNORE INTO templates VALUES (?,?,?,?)", (slug, title, body, now()))
-        # Replace only untouched original defaults. User-edited scripts remain intact.
-        for slug, (_, old_body) in LEGACY_TEMPLATES.items():
-            if slug in TEMPLATES:
-                title, body = TEMPLATES[slug]
-                db.execute("""UPDATE templates SET title=?,body=?,updated_at=?
-                    WHERE slug=? AND body=?""", (title, body, now(), slug, old_body))
+        _migrate_templates(db)
 
 
 def init_desktop_db(path: Path = DB_PATH) -> None:
     """Initialize desktop-only CRM extensions without changing server-mode startup."""
+    ensure_known_schema(path)
     _backup_before_migration(path, DESKTOP_SCHEMA_VERSION)
     init_db(path)
     with connection(path) as db:
@@ -303,6 +393,10 @@ def init_desktop_db(path: Path = DB_PATH) -> None:
         """)
         timestamp = now()
         db.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?,?)", (DETAILS_SCHEMA_VERSION, timestamp))
+        from .outreach import SCHEMA as OUTREACH_SCHEMA
+        db.executescript(OUTREACH_SCHEMA)
+        from .leads import HIDDEN
+        db.execute(HIDDEN)
         db.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?,?)", (DESKTOP_SCHEMA_VERSION, timestamp))
         # Idempotent host migration. _backup_before_migration() ran before this transaction.
         for row in db.execute("SELECT id,map_url FROM businesses"):
@@ -485,6 +579,8 @@ def parse_run_businesses(run_id: str, path: Path = DB_PATH, *, query: str = "", 
     if site_type:
         conditions.append("b.site_type=?")
         args.append(site_type)
+    if _has_table(path, "hidden_businesses"):
+        conditions.append("NOT EXISTS (SELECT 1 FROM hidden_businesses h WHERE h.business_id=b.id)")
     filters = " AND ".join(conditions)
     with connection(path) as conn:
         if run_id.startswith("legacy:"):
@@ -566,6 +662,20 @@ def claim_job(path: Path = DB_PATH) -> dict | None:
         item = decode_job(row)
         item["status"] = "running"
         return item
+
+
+def stop_queued_job(job_id: str, path: Path = DB_PATH) -> bool:
+    """Stop a job that has not started yet; False when it is already running or finished."""
+    with connection(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        changed = conn.execute("""UPDATE jobs SET status='stopped',error='Остановлено до запуска',
+            result=?,updated_at=? WHERE id=? AND status='queued'""",
+            (json.dumps({"partial": True, "matched": 0, "reason": "Остановлено до запуска"}, ensure_ascii=False),
+             now(), job_id)).rowcount
+        if changed:
+            conn.execute("UPDATE parse_runs SET status='stopped',ended_at=? WHERE job_id=? AND status='queued'",
+                         (now(), job_id))
+        return bool(changed)
 
 
 def update_job(job_id: str, *, status: str | None = None, progress: dict | None = None,
@@ -721,6 +831,26 @@ def incomplete_job_review_items(job_id: str, review_limit: int,
         return [dict(row) for row in rows]
 
 
+def job_detail_items(job_id: str, review_limit: int, path: Path = DB_PATH) -> list[dict]:
+    """Cards of a search job that still lack a photo count or reviews (search pass 2)."""
+    cap = min(100, max(0, int(review_limit)))
+    with connection(path) as conn:
+        rows = conn.execute("""SELECT b.id,b.map_url,d.photo_count,
+                (? > 0 AND COALESCE(d.reviews_complete,0)=0 AND COALESCE(b.reviews,1) > 0
+                 AND (SELECT COUNT(*) FROM reviews r WHERE r.business_id=b.id)
+                     < MIN(?, COALESCE(NULLIF(b.reviews,0), ?))) AS needs_reviews
+            FROM job_results jr JOIN businesses b ON b.id=jr.business_id
+            LEFT JOIN business_details d ON d.business_id=b.id
+            WHERE jr.job_id=? ORDER BY jr.rowid""", (cap, cap, cap, job_id)).fetchall()
+    return [dict(row) for row in rows if row["photo_count"] is None or row["needs_reviews"]]
+
+
+def set_business_photo_count(business_id: str, count: int, path: Path = DB_PATH) -> None:
+    with connection(path) as conn:
+        conn.execute("UPDATE business_details SET photo_count=?,updated_at=? WHERE business_id=?",
+                     (max(0, int(count)), now(), business_id))
+
+
 def upsert_business(data: dict, tag: tuple[str, str, str], job_id: str, path: Path = DB_PATH,
                     *, store_details: bool = False, review_limit: int = 100,
                     parse_run_id: str | None = None) -> bool:
@@ -785,13 +915,18 @@ def known_ids(path: Path = DB_PATH) -> set[str]:
 
 
 def search_key(params: dict) -> str:
-    """A changed count does not make a previously checked search new."""
-    return json.dumps({
+    """A changed count does not make a previously checked search new; a changed «отзывов от» does,
+    otherwise cards dropped by a high threshold would never come back with a lower one."""
+    key = {
         "country": normalized(params["country"]),
         "city": normalized(params["city"]),
         "niche": normalized(params["niche"]),
         "types": sorted(set(params["types"])),
-    }, ensure_ascii=False, sort_keys=True)
+    }
+    minimum = int(params.get("min_reviews") or 0)
+    if minimum > 0:  # no threshold keeps the old key, so earlier history stays valid
+        key["min_reviews"] = minimum
+    return json.dumps(key, ensure_ascii=False, sort_keys=True)
 
 
 def checked_ids(key: str, path: Path = DB_PATH) -> set[str]:
@@ -1008,6 +1143,23 @@ def set_desktop_diagnostics_enabled(enabled: bool, path: Path = DB_PATH) -> bool
     return bool(enabled)
 
 
+def desktop_setting(key: str, default: str = "", path: Path | None = None) -> str:
+    with connection(path or DB_PATH) as conn:
+        row = conn.execute("SELECT value FROM desktop_settings WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+
+def set_desktop_setting(key: str, value: str, path: Path | None = None) -> None:
+    with connection(path or DB_PATH) as conn:
+        conn.execute("INSERT INTO desktop_settings(key,value) VALUES(?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
+def _has_table(path: Path, name: str) -> bool:
+    with connection(path) as conn:
+        return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
 def list_businesses(filters: dict, path: Path = DB_PATH, limit: int = 50, offset: int = 0) -> list[dict]:
     conditions, args = [], []
     for key in ("niche", "country", "city"):
@@ -1021,6 +1173,8 @@ def list_businesses(filters: dict, path: Path = DB_PATH, limit: int = 50, offset
     if filters.get("q"):
         conditions.append("(b.name LIKE ? OR b.address LIKE ?)")
         args.extend([f"%{filters['q']}%"] * 2)
+    if _has_table(path, "hidden_businesses"):
+        conditions.append("NOT EXISTS (SELECT 1 FROM hidden_businesses h WHERE h.business_id=b.id)")
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
     with connection(path) as db:
         ids = [row[0] for row in db.execute(
@@ -1129,20 +1283,30 @@ def list_contact_permissions(status: str = "blocked", path: Path = DB_PATH) -> l
 
 
 def stats(path: Path = DB_PATH) -> dict:
+    # Leads deleted from the lists («Удалить») are left out, so the numbers match what the admin sees.
+    has_hidden = _has_table(path, "hidden_businesses")
+
+    def visible(column: str) -> str:
+        return f"NOT EXISTS (SELECT 1 FROM hidden_businesses h WHERE h.business_id={column})" if has_hidden else "1=1"
+
+    shown = visible("b.id")
     with connection(path) as db:
-        total = db.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
-        status = {row[0]: row[1] for row in db.execute("SELECT status,COUNT(*) FROM businesses GROUP BY status")}
-        types = {row[0]: row[1] for row in db.execute("SELECT site_type,COUNT(*) FROM businesses GROUP BY site_type")}
-        grouped = [dict(row) for row in db.execute("""SELECT t.niche,t.country,t.city,b.site_type,
+        total = db.execute(f"SELECT COUNT(*) FROM businesses b WHERE {shown}").fetchone()[0]
+        status = {row[0]: row[1] for row in db.execute(
+            f"SELECT status,COUNT(*) FROM businesses b WHERE {shown} GROUP BY status")}
+        types = {row[0]: row[1] for row in db.execute(
+            f"SELECT site_type,COUNT(*) FROM businesses b WHERE {shown} GROUP BY site_type")}
+        grouped = [dict(row) for row in db.execute(f"""SELECT t.niche,t.country,t.city,b.site_type,
             COUNT(DISTINCT t.business_id) AS count FROM business_tags t
-            JOIN businesses b ON b.id=t.business_id
+            JOIN businesses b ON b.id=t.business_id WHERE {shown}
             GROUP BY t.niche,t.country,t.city,b.site_type ORDER BY count DESC""")]
         timeline = [dict(row) for row in db.execute("""SELECT substr(changed_at,1,10) AS day,new_status AS status,COUNT(*) AS count
             FROM status_events GROUP BY day,new_status ORDER BY day DESC LIMIT 90""")]
-        contacted = db.execute("""SELECT COUNT(DISTINCT business_id) FROM status_events
-            WHERE new_status IN ('waiting','replied','working','completed')""").fetchone()[0]
-        replied = db.execute("""SELECT COUNT(DISTINCT business_id) FROM status_events
-            WHERE new_status IN ('replied','working','completed')""").fetchone()[0]
+        event_shown = visible("e.business_id")
+        contacted = db.execute(f"""SELECT COUNT(DISTINCT e.business_id) FROM status_events e
+            WHERE e.new_status IN ('waiting','replied','working','completed') AND {event_shown}""").fetchone()[0]
+        replied = db.execute(f"""SELECT COUNT(DISTINCT e.business_id) FROM status_events e
+            WHERE e.new_status IN ('replied','working','completed') AND {event_shown}""").fetchone()[0]
     return {"total": total, "statuses": {key: status.get(key, 0) for key in STATUSES},
             "site_types": types, "groups": grouped, "timeline": timeline,
             "contacted": contacted, "replied": replied,
@@ -1150,16 +1314,56 @@ def stats(path: Path = DB_PATH) -> dict:
 
 
 def templates(path: Path = DB_PATH) -> list[dict]:
+    """Scripts grouped category → stage (column `sort`); inside a place, shipped first,
+    then AI scripts and user copies newest first (their slug starts with the time)."""
     with connection(path) as db:
         rows = [dict(row) for row in db.execute("SELECT * FROM templates")]
-        order = {slug: index for index, slug in enumerate(TEMPLATES)}
-        return sorted(rows, key=lambda row: order.get(row["slug"], len(order)))
+    rows.sort(key=lambda row: row["slug"], reverse=True)
+    def position(row):
+        if row.get("category"):
+            return row.get("sort") or 0
+        # Inserted without a group (an old client): the end of «Общие».
+        meta = scripts.parse_slug(row["slug"])
+        return scripts.sort_key(*meta) if meta else scripts.sort_key("general")
+    rows.sort(key=lambda row: (position(row), row.get("origin", "builtin") != "builtin"))
+    return rows
+
+
+def template(slug: str, path: Path = DB_PATH) -> dict | None:
+    """One script by slug; old flat slugs (quick_no_site, first…) resolve to their new place."""
+    with connection(path) as db:
+        row = db.execute("SELECT * FROM templates WHERE slug=?", (slug,)).fetchone() or db.execute(
+            "SELECT * FROM templates WHERE slug=?", (scripts.resolve_slug(slug),)).fetchone()
+    return dict(row) if row else None
 
 
 def save_template(slug: str, body: str, path: Path = DB_PATH) -> bool:
     with connection(path) as db:
         cur = db.execute("UPDATE templates SET body=?,updated_at=? WHERE slug=?", (body, now(), slug))
+        if not cur.rowcount and scripts.resolve_slug(slug) != slug:
+            cur = db.execute("UPDATE templates SET body=?,updated_at=? WHERE slug=?",
+                             (body, now(), scripts.resolve_slug(slug)))
         return cur.rowcount > 0
+
+
+def add_ai_template(title: str, body: str, path: Path = DB_PATH, *, category: str = "general",
+                    stage: str = "", subtype: str = "") -> str:
+    """Save an AI result. It shows up in its category on «Скрипты» (`general` when none is given)."""
+    slug = f"ai_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:4]}"
+    if category not in scripts.CATEGORIES:
+        category = "general"
+    with connection(path) as db:
+        db.execute("""INSERT INTO templates(slug,title,body,updated_at,origin,category,stage,subtype,sort)
+            VALUES (?,?,?,?,'ai',?,?,?,?)""",
+                   (slug, title, body, now(), category, stage, subtype, scripts.sort_key(category, stage, subtype)))
+    return slug
+
+
+def delete_template(slug: str, path: Path = DB_PATH) -> bool:
+    """Only AI scripts and the user's own copies can be deleted; shipped ones stay."""
+    with connection(path) as db:
+        return db.execute("DELETE FROM templates WHERE slug=? AND origin IN ('ai','custom')",
+                          (slug,)).rowcount > 0
 
 
 def rotate_bot_flow(chat_id: int, kind: str, flow_id: str, path: Path = DB_PATH) -> list[int]:

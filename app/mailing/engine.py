@@ -42,6 +42,8 @@ class Engine:
                  policy: Callable[[], Policy] | None = None,
                  test_recipients: Callable[[], set[str]] | None = None,
                  external_blocked: Callable[[], set[str]] | None = None,
+                 on_sent: Callable[[dict], None] | None = None,
+                 on_reply: Callable[[dict, bool], None] | None = None,
                  clock: Callable[[], datetime] = utcnow,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  tick: float = 0.25, rng: random.Random | None = None):
@@ -52,6 +54,8 @@ class Engine:
         self.policy = policy or Policy
         self.test_recipients = test_recipients or (lambda: set())
         self.external_blocked = external_blocked or (lambda: set())
+        self.on_sent = on_sent or (lambda _recipient: None)
+        self.on_reply = on_reply or (lambda _recipient, _stop: None)
         self.clock = clock
         self.sleep = sleep
         self.tick = tick
@@ -264,11 +268,19 @@ class Engine:
                 return "skipped", "stoplist", "Аккаунт в стоп-листе"
             if self.store.value("SELECT 1 FROM unreachable WHERE target=?", (f"username:{username}",)):
                 return "unreachable", "known_unreachable", "Ранее недоступен, повторов нет"
+            # A repeat of a batch (reminder or another text) writes again on purpose, but once per
+            # repeat campaign; any other campaign never writes twice to the same organization.
+            repeat = bool(campaign.get("parent_id"))
             already = self.store.value(
                 "SELECT 1 FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
                 "WHERE c.kind='normal' AND r.status='sent' AND r.id<>? AND "
-                "(r.business_id=? OR (r.username IS NOT NULL AND r.username=?)) LIMIT 1",
-                (recipient["id"], recipient["business_id"], username))
+                "(r.business_id=? OR (r.username IS NOT NULL AND r.username=?)) "
+                + ("AND r.campaign_id=? " if repeat else "") + "LIMIT 1",
+                (recipient["id"], recipient["business_id"], username, *((campaign["id"],) if repeat else ())))
+            if not already and repeat and self.store.value(
+                    "SELECT 1 FROM batch_exclusions WHERE batch_id=? AND business_id=?",
+                    (campaign.get("batch_id") or campaign["parent_id"], recipient["business_id"])):
+                return "skipped", "excluded", "Убран из пачки"
             if already:
                 return "skipped", "already_sent", "Этой организации уже писали"
         if account["is_test"] and username not in self.test_recipients():
@@ -424,6 +436,10 @@ class Engine:
                          (msg_id, scrub(response)[:300], now, attempt_id))
             conn.execute("UPDATE recipients SET status='sent',msg_id=?,sent_at=?,reason_kind='',reason='' WHERE id=?",
                          (msg_id, now, recipient["id"]))
+        try:
+            self.on_sent(dict(recipient))   # «Лиды»: status «Написал», reminder in «Сегодня»
+        except Exception:
+            log.exception("Отметка отправки в «Лидах»")
 
     def _close_recipient(self, recipient_id: int, status: str, kind: str, reason: str) -> None:
         with self.store.tx() as conn:
@@ -530,6 +546,12 @@ class Engine:
                 self.store.stop_add("business", rows[0]["business_id"], name, "reply")
                 if rows[0]["username"]:
                     self.store.stop_add("username", rows[0]["username"], name, "reply")
+        for row in rows:
+            if row["kind"] == "normal":
+                try:
+                    self.on_reply(dict(row), is_stop)
+                except Exception:
+                    log.exception("Отметка ответа в «Лидах»")
         self.store.event("reply_stop" if is_stop else "reply",
                          f"{name}: {'просит не писать — в стоп-листе' if is_stop else 'ответил'}",
                          account_id=account_id, recipient_id=rows[0]["id"])

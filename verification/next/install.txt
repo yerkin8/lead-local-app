@@ -1,0 +1,29 @@
+Установка сборки «скорость поиска, остановка, пачки и повтор» — 01.11.2026 03:06 (с согласия владельца)
+
+Сборка: build.ps1 → dist\LeadEqualMoney (899 файлов, ветка claude/search-speed-stop-history-78610f).
+Проверки до установки: verify.ps1 — PASS; обход окна — 53/53 (verification/next/ui/report.json).
+Скан утечек (scripts\mailing_leak_scan.py --known secrets\accounts.json):
+  dist: scanned_files=899 known_values=5 findings=0; отчёты и документы docs/next, verification/next: findings=0.
+
+Приложение было закрыто (процесса LeadEqualMoney нет).
+Резервная копия: C:\Users\User\Documents\backups\LeadEqualMoney-pre-next-20261101-030626\
+  roaming\        — вся папка %APPDATA%\LeadEqualMoney (356 файлов, 104 693 913 байт — совпадает с источником)
+  desktop-build\  — прежняя сборка с рабочего стола
+Установка: новая сборка в C:\Users\User\Desktop\LeadEqualMoney (+ ПРОЧТИ.txt, «Создать ярлык.cmd»,
+create_shortcut.ps1 из прежней папки), ярлык прежний; exe совпадает с собранным (SHA-256).
+Прежняя папка перенесена во временную %TEMP%\claude\lem-old-desktop-build (удаление на рабочем столе
+заблокировано инструментом; копия — в desktop-build\ резервной копии).
+
+Запуск на реальных данных (scripts\unify_real_switch.py, verification/next/real-switch.txt):
+окно отвечает, 42 организации, мастер первого запуска не показан, открываются все 9 разделов,
+ошибок нет, закрыто штатно. Скриншот «Рассылки» не сохранён в репозиторий (маска номера аккаунта).
+
+Сверка до/после (только чтение, без содержимого):
+  app.sqlite3: integrity ok; миграции 1,2,3,4,7 без изменений; число строк во всех таблицах совпадает;
+               статусы лидов совпадают.
+  mailing.sqlite3: integrity ok; строки без изменений; добавлены колонки campaigns.batch_id, parent_id,
+               stage и пустая таблица batch_exclusions (пачки и повторы); остальные файлы рассылки
+               (ключи, сессии, соль) не изменились.
+
+Откат: закрыть приложение; вернуть папку roaming\ из резервной копии в %APPDATA%\LeadEqualMoney и сборку
+desktop-build\ на рабочий стол. Возврат папки roaming\ убирает и новые колонки рассылки.

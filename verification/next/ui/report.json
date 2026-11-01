@@ -1,0 +1,245 @@
+{
+ "checks": {
+  "start_page_is_leads": {
+   "ok": true,
+   "detail": "leads"
+  },
+  "no_base_or_panel_in_sidebar": {
+   "ok": true,
+   "detail": ""
+  },
+  "section_leads_opens": {
+   "ok": true,
+   "detail": "view=leads active=leads"
+  },
+  "section_results_opens": {
+   "ok": true,
+   "detail": "view=results active=results"
+  },
+  "section_today_opens": {
+   "ok": true,
+   "detail": "view=today active=today"
+  },
+  "section_search_opens": {
+   "ok": true,
+   "detail": "view=search active=search"
+  },
+  "section_scripts_opens": {
+   "ok": true,
+   "detail": "view=scripts active=scripts"
+  },
+  "section_ai_opens": {
+   "ok": true,
+   "detail": "view=ai active=ai"
+  },
+  "section_mailing_opens": {
+   "ok": true,
+   "detail": "view=mailing active=mailing"
+  },
+  "mailing_section_loads": {
+   "ok": true,
+   "detail": ""
+  },
+  "section_media_opens": {
+   "ok": true,
+   "detail": "view=media active=media"
+  },
+  "section_settings_opens": {
+   "ok": true,
+   "detail": "view=settings active=settings"
+  },
+  "back_hidden_on_every_root": {
+   "ok": true,
+   "detail": []
+  },
+  "sidebar_data_path_short": {
+   "ok": true,
+   "detail": ""
+  },
+  "settings_save_not_over_labels": {
+   "ok": true,
+   "detail": ""
+  },
+  "settings_without_old_data_tools": {
+   "ok": true,
+   "detail": ""
+  },
+  "settings_has_no_server_admins": {
+   "ok": true,
+   "detail": ""
+  },
+  "no_horizontal_scroll_in_settings": {
+   "ok": true,
+   "detail": ""
+  },
+  "settings_has_ai_key_panel": {
+   "ok": true,
+   "detail": ""
+  },
+  "ai_key_form_saves_without_echo": {
+   "ok": true,
+   "detail": {
+    "had_form": true,
+    "chat_open": true
+   }
+  },
+  "scripts_grouped_by_category": {
+   "ok": true,
+   "detail": 7
+  },
+  "leads_opens_card": {
+   "ok": true,
+   "detail": "detail"
+  },
+  "card_four_offers": {
+   "ok": true,
+   "detail": "site,landing,bot,promotion"
+  },
+  "card_copy_buttons": {
+   "ok": true,
+   "detail": ""
+  },
+  "card_status_call": {
+   "ok": true,
+   "detail": ""
+  },
+  "card_no_notes": {
+   "ok": true,
+   "detail": ""
+  },
+  "sidebar_on_card_is_leads": {
+   "ok": true,
+   "detail": ""
+  },
+  "input_kept_after_ready_and_poll": {
+   "ok": true,
+   "detail": "ТЕКСТ-ПРОВЕРКА"
+  },
+  "back_returns_to_leads": {
+   "ok": true,
+   "detail": {
+    "depth": 2,
+    "trail": [
+     "lead:leads",
+     "leads:leads"
+    ]
+   }
+  },
+  "back_hidden_at_root": {
+   "ok": true,
+   "detail": ""
+  },
+  "today_warning_one_line": {
+   "ok": true,
+   "detail": ""
+  },
+  "today_opens_card": {
+   "ok": true,
+   "detail": "detail"
+  },
+  "back_from_card_to_today": {
+   "ok": true,
+   "detail": "today"
+  },
+  "lead_row_opens_lead_card": {
+   "ok": true,
+   "detail": "lead"
+  },
+  "lead_bar_present": {
+   "ok": true,
+   "detail": ""
+  },
+  "lead_bar_prev_disabled_on_first": {
+   "ok": true,
+   "detail": ""
+  },
+  "back_named_to_leads": {
+   "ok": true,
+   "detail": ""
+  },
+  "lead_next_then_prev": {
+   "ok": true,
+   "detail": {
+    "first": "demo-09-01-29",
+    "second": "demo-09-02-29",
+    "back": "demo-09-01-29"
+   }
+  },
+  "sidebar_on_lead_is_leads": {
+   "ok": true,
+   "detail": ""
+  },
+  "search_stop_button_on_running_job": {
+   "ok": true,
+   "detail": ""
+  },
+  "search_shows_review_pass": {
+   "ok": true,
+   "detail": "Кофейни · Казань\nЦель 30 новых · отзывов 10 · 01.11, 02:37\nВ работе\nОстановить\nРезультаты\nНовых 7\nУже в базе 0\nПроверены ранее 0\nПросмотрены 12\nОшибки 0\nКарточки найдены, догружаю отзывы и фото: 3 из 7"
+  },
+  "search_stop_click_marks_stopping": {
+   "ok": true,
+   "detail": ""
+  },
+  "search_stopped_label": {
+   "ok": true,
+   "detail": "Кофейни · Казань\nЦель 30 новых · отзывов 10 · 01.11, 02:37\nОстановлен\nРезультаты\nНовых 7\nУже в базе 0\nПроверены ранее 0\nПросмотрены 12\nОшибки 0\nОстановлен. Найденные до остановки (7) — в «Лидах»."
+  },
+  "mailing_batch_results_per_business": {
+   "ok": true,
+   "detail": "■ Аварийный стоп\nОстанавливает все отправки сразу\nЗавершена\nКофейни · Казань\n\nСоздана 2026-10-31 23:37\n\nОбновить статистику\nУдалить\nРеальная отправка выключена. Чтобы включить её осознанно, введите слово ОТПРАВИТЬ. Сообщения получат настоящие организации.\nВключить реальную отправку\nОтправлено\n0\nСухо"
+  },
+  "mailing_lead_status_shown": {
+   "ok": true,
+   "detail": ""
+  },
+  "mailing_exclude_buttons": {
+   "ok": true,
+   "detail": ""
+  },
+  "mailing_repeat_reminder_default": {
+   "ok": true,
+   "detail": ""
+  },
+  "mailing_repeat_skips_replied": {
+   "ok": true,
+   "detail": "Получат 5 из 6. Не попадут: В «Лидах»: Ответили — 1.\n\nПо умолчанию не попадают ответившие, убранные из пачки, стоп-лист, «Не писать» и лиды со статусом «Ответили», «В работе», «Договорились», «Отказ»."
+  },
+  "mailing_repeat_dry_only_for_dry_batch": {
+   "ok": true,
+   "detail": ""
+  },
+  "mailing_exclude_then_include_button": {
+   "ok": true,
+   "detail": ""
+  },
+  "mailing_repeat_dry_created": {
+   "ok": true,
+   "detail": {
+    "stage": "reminder",
+    "counts": {
+     "queued": 0,
+     "sending": 0,
+     "sent": 0,
+     "dry_sent": 4,
+     "skipped": 0,
+     "unreachable": 0,
+     "failed": 0,
+     "stoplist": 0,
+     "replied": 0,
+     "total": 4
+    }
+   }
+  },
+  "mailing_batch_lists_both": {
+   "ok": true,
+   "detail": ""
+  },
+  "no_js_errors": {
+   "ok": true,
+   "detail": []
+  }
+ },
+ "log": [],
+ "passed": true
+}

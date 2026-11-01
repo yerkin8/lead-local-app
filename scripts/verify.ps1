@@ -20,7 +20,7 @@ function Run-Check([string]$Name, [scriptblock]$Command) {
   if ($LASTEXITCODE -ne 0) { throw "Проверка не пройдена: $Name (код $LASTEXITCODE)" }
 }
 
-Run-Check 'Тест менеджера опроса' { node --test tests\activity-poller.test.cjs }
+Run-Check 'Тест менеджера опроса, транспорта и интерфейса' { node --test tests\activity-poller.test.cjs tests\transport.test.cjs tests\desktop-ui.test.cjs tests\ai-chat.test.cjs }
 Run-Check 'Тест снимка активности SQLite' { & $Python -m unittest tests.test_activity_snapshot -v }
 Run-Check 'Тест ручных ссылок Telegram' { & $Python -m unittest tests.test_phone_links -v }
 Run-Check 'Тест расширенных данных организаций Stage 3' { & $Python -m unittest tests.test_business_details -v }
@@ -29,6 +29,14 @@ Run-Check 'Тест иерархии запусков базы desktop Stage 5' 
 Run-Check 'Нормализация ссылок Яндекса Stage 9' { & $Python -m unittest tests.test_yandex_urls -v }
 Run-Check 'Тест данных превью папок Stage 6' { & $Python -m unittest tests.test_folder_preview_data -v }
 Run-Check 'Ядро рассылки Telegram на FakeGateway' { & $Python -m unittest tests.test_mailing_core tests.test_mailing_bridge -v }
+Run-Check 'Все тесты Python (перенос Mini App + рассылка), временная DATA_DIR' {
+  $env:DATA_DIR = Join-Path ([IO.Path]::GetTempPath()) ('lem-verify-' + [guid]::NewGuid().ToString('N'))
+  # UTF-8 mode: subprocess-based tests read child output as text; the console code page must not decide it.
+  $env:PYTHONUTF8 = '1'
+  try { & $Python -m unittest discover -s tests } finally {
+    Remove-Item Env:DATA_DIR -ErrorAction SilentlyContinue; Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue
+  }
+}
 Run-Check 'Старый интерфейс Telegram отключён, рассылка только в app/mailing' { & $Python scripts\check_desktop_telegram_surface.py }
 Run-Check 'Компиляция backend-парсера и моста' { & $Python -m compileall -q app\db.py app\lead_parser.py app\desktop_gallery.py app\media_service.py app\desktop_services.py app\desktop.py app\mailing }
 Run-Check 'Синтаксис JavaScript desktop' {
@@ -40,9 +48,23 @@ Run-Check 'Синтаксис JavaScript desktop' {
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   node --check app\desktop_ui\stage9.js
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-  node --check app\desktop_ui\glass-folder.js
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   node --check app\desktop_ui\mailing.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\transport.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\platform.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\leads.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\today.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\ai-core.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\ai.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\stats.js
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  node --check app\desktop_ui\desk-shell.js
 }
 Run-Check 'Запрет автопереходов и отдельных интервалов' { & $Python scripts\check_refresh_sources.py }
 Run-Check 'Токены, контраст и локальные шрифты desktop' { & $Python scripts\check_desktop_theme.py --report verification\design\theme-static-check.txt }

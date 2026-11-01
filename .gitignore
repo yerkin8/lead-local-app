@@ -147,3 +147,8 @@ LeadGen Base/
 # Telegram mailing: owner's keys, phones and test recipients. Never commit or ship.
 # Only the empty examples are tracked (added with git add -f).
 secrets/
+
+# Source files of the «Лиды» section (not lead exports)
+!app/leads.py
+!app/desktop_ui/leads.js
+!app/desktop_ui/leads.css

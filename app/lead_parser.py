@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -19,10 +20,11 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from . import db
+from . import cancel, db
 from .config import DATA_DIR
 from .driver_registry import register as register_driver, quit_driver
 from .domain import classify_site, host_of, is_social, normalized, org_id
+from .errors import YandexBlocked
 from .yandex_urls import normalize_yandex_url
 
 
@@ -36,6 +38,10 @@ class SearchStopped(RuntimeError):
     pass
 
 
+class SearchBlocked(SearchStopped, YandexBlocked):
+    """Captcha or rate limit: the job ends as "blocked", retry later."""
+
+
 def make_driver() -> webdriver.Chrome:
     options = Options()
     options.add_argument("--headless=new")
@@ -45,6 +51,10 @@ def make_driver() -> webdriver.Chrome:
     options.add_argument("--window-size=1400,900")
     options.add_argument("--lang=ru-RU")
     options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
+    from .driver_registry import profile_argument
+    profile = profile_argument()
+    if profile:
+        options.add_argument(profile)
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(45)
     driver.set_script_timeout(20)
@@ -72,6 +82,36 @@ def number(value: str | None) -> float | None:
         return None
     match = re.search(r"\d+(?:[.,]\d+)?", value.replace("\u00a0", ""))
     return float(match.group().replace(",", ".")) if match else None
+
+
+def review_count(value: str | None) -> int:
+    """«1 234 отзыва» → 1234 (any space between digit groups), «1,2 тыс. отзывов» → 1200."""
+    text = str(value or "").casefold()
+    match = re.search(r"\d+(?:\s\d{3})*(?:[.,]\d+)?", text)
+    if not match:
+        return 0
+    amount = float(re.sub(r"\s", "", match.group()).replace(",", "."))
+    if re.search(r"\d\s*тыс", text):
+        amount *= 1000
+    return int(round(amount))
+
+
+def min_reviews(params: dict) -> int:
+    return max(0, int(params.get("min_reviews") or 0))
+
+
+def fits(row: dict, params: dict) -> bool:
+    """The card has a wanted site type and at least «отзывов от N»."""
+    return (row.get("site_type") in params.get("types", [])
+            and int(row.get("reviews") or 0) >= min_reviews(params))
+
+
+def _with_threshold_hint(reason: str, matched: int, params: dict) -> str:
+    """When the target was missed, say that the threshold filtered cards out."""
+    minimum = min_reviews(params)
+    if minimum and matched < int(params.get("count") or 0):
+        return f"{reason}. Часть карточек отсеял фильтр «отзывов от {minimum}» — можно снизить порог"
+    return reason
 
 
 def public_host(host: str) -> bool:
@@ -318,7 +358,8 @@ def extract_review_items(page: str, limit: int = 100) -> list[dict]:
         rating_node = card.select_one(SELECTORS["reviews"]["rating"])
         rating_value = (rating_node.get("content") or rating_node.get("aria-label") or rating_node.get_text(" ", strip=True)) if rating_node else ""
         date_node = card.select_one(SELECTORS["reviews"]["date"])
-        date_value = (date_node.get("datetime") or date_node.get_text(" ", strip=True)) if date_node else ""
+        date_value = (date_node.get("content") or date_node.get("datetime")
+                      or date_node.get_text(" ", strip=True)) if date_node else ""
         response_node = card.select_one(SELECTORS["reviews"]["company_response"])
         result.append({"text": text, "rating": number(str(rating_value)),
                        "date": str(date_value).strip(),
@@ -346,7 +387,7 @@ def parse_org(driver, url: str) -> dict:
     WebDriverWait(driver, 20).until(lambda d: d.find_elements(
         By.CSS_SELECTOR, SELECTORS["organization"]["name"]) or captcha(d))
     if captcha(driver):
-        raise SearchStopped(block_message(driver))
+        raise SearchBlocked(block_message(driver))
     return parse_org_html(url, driver.page_source)
 
 
@@ -360,7 +401,19 @@ def _selector_texts(soup, selector: str) -> list[str]:
                                for node in soup.select(selector) if node.get_text(" ", strip=True)))
 
 
-def parse_org_html(url: str, page: str, review_limit: int = 100) -> dict:
+def site_needs_check(row: dict) -> bool:
+    """The domain alone does not tell whether the site is a builder or down: fetch it."""
+    return bool(row.get("website")) and row.get("site_type") not in {"weak_site", "no_site"}
+
+
+def apply_site_check(row: dict, html: str | None, failed: bool) -> dict:
+    row["site_type"], row["site_engine"] = classify_site(row.get("website"), html, failed)
+    return row
+
+
+def parse_org_html(url: str, page: str, review_limit: int = 100, *, check_site: bool = True) -> dict:
+    """Card fields. ``check_site=False`` leaves a pending site check to the caller
+    (``site_needs_check`` / ``apply_site_check``) so sites can be checked in parallel."""
     soup = BeautifulSoup(page, "html.parser")
     selectors = SELECTORS["organization"]
     socials = extract_socials(soup)
@@ -375,7 +428,7 @@ def parse_org_html(url: str, page: str, review_limit: int = 100) -> dict:
             socials.append({"label": host_of(site), "url": clean})
         site = None
     site_type, engine = classify_site(site)
-    if site_type != "weak_site" and site:
+    if check_site and site_type != "weak_site" and site:
         html, failed = fetch_site(site)
         site_type, engine = classify_site(site, html, failed)
     categories = _selector_texts(soup, selectors["categories"])
@@ -393,7 +446,7 @@ def parse_org_html(url: str, page: str, review_limit: int = 100) -> dict:
         "phones": _selector_texts(soup, selectors["phones"]),
         "socials": socials, "website": site, "site_type": site_type,
         "site_engine": engine, "rating": number(_selector_text(soup, selectors["rating"])),
-        "reviews": int(number(_selector_text(soup, selectors["review_count"])) or 0),
+        "reviews": review_count(_selector_text(soup, selectors["review_count"])),
         "address": _selector_text(soup, selectors["address"]), "map_url": normalize_yandex_url(url),
         "details": {**details, "photo_count": photo_count},
         "review_items": extract_review_items(page, review_limit),
@@ -443,7 +496,7 @@ def collect_reviews_http(session: requests.Session, review_url: str, business_id
         seen_pages.add(current)
         pages += 1
         try:
-            time.sleep(random.uniform(0.5, 1.0))
+            cancel.sleep(random.uniform(0.4, 0.8))
             actual, page = request_page(session, current)
             items = extract_review_items(page, cap)
             new_count = db.append_business_reviews(business_id, items, cap)
@@ -467,7 +520,6 @@ def collect_reviews_http(session: requests.Session, review_url: str, business_id
             _log_parser_event(logging.WARNING, "review_page_fetch_failed", business_id=business_id,
                               error_type=type(exc).__name__, page_number=pages)
             break
-        time.sleep(random.uniform(0.5, 1.0))
     complete = not request_failed and (db.business_review_count(business_id) >= cap or not pending or stale >= 3)
     db.set_review_collection_state(business_id, cap, complete)
     _log_parser_event(logging.INFO, "reviews_collected", business_id=business_id,
@@ -477,7 +529,7 @@ def collect_reviews_http(session: requests.Session, review_url: str, business_id
 
 def collect_gallery_photo_count_http(session: requests.Session, gallery_url: str) -> int | None:
     try:
-        time.sleep(random.uniform(0.5, 1.0))
+        cancel.sleep(random.uniform(0.4, 0.8))
         _, page = request_page(session, gallery_url)
         soup = BeautifulSoup(page, "html.parser")
         urls = set()
@@ -507,8 +559,8 @@ def collect_reviews_browser(driver, review_url: str, business_id: str,
         WebDriverWait(driver, 12).until(lambda d: d.execute_script(
             "return document.readyState === 'complete'"))
         if captcha(driver):
-            raise SearchStopped(block_message(driver))
-        time.sleep(0.7)
+            raise SearchBlocked(block_message(driver))
+        cancel.sleep(0.7)
         while scrolls <= int(config["max_scrolls"]) and db.business_review_count(business_id) < cap:
             items = extract_review_items(driver.page_source, cap)
             new_count = db.append_business_reviews(business_id, items, cap)
@@ -530,7 +582,7 @@ def collect_reviews_browser(driver, review_url: str, business_id: str,
                 if stale >= int(config["stale_scrolls"]):
                     break
             scrolls += 1
-            time.sleep(random.uniform(0.6, 1.0))
+            cancel.sleep(random.uniform(0.6, 1.0))
     except SearchStopped:
         raise
     except Exception as exc:
@@ -561,7 +613,7 @@ def collect_gallery_photo_count(driver, gallery_url: str, profile_url: str) -> i
         WebDriverWait(driver, 10).until(lambda d: d.execute_script(
             "return document.readyState === 'complete'"))
         if captcha(driver):
-            raise SearchStopped(block_message(driver))
+            raise SearchBlocked(block_message(driver))
         for _ in range(int(config["max_scrolls"])):
             urls = driver.execute_script("""
               return Array.from(document.querySelectorAll(arguments[0]))
@@ -582,7 +634,7 @@ def collect_gallery_photo_count(driver, gallery_url: str, profile_url: str) -> i
                 stale += 1
             if stale >= int(config["stale_scrolls"]):
                 break
-            time.sleep(0.4)
+            cancel.sleep(0.4)
     except SearchStopped:
         raise
     except Exception as exc:
@@ -633,10 +685,28 @@ def request_page(session: requests.Session, url: str) -> tuple[str, str]:
     body = response.text
     plain = BeautifulSoup(body[:20000], "html.parser").get_text(" ", strip=True).casefold()
     if response.status_code in {403, 429} or plain == "limited" or "showcaptcha" in response.url.lower():
-        raise SearchStopped("Яндекс временно ограничил запросы или показал капчу")
+        raise SearchBlocked("Яндекс временно ограничил запросы или показал капчу")
     if response.status_code >= 400:
         raise SearchStopped(f"Яндекс.Карты вернули HTTP {response.status_code}")
     return response.url, body
+
+
+def _state_items(soup: BeautifulSoup) -> list[dict]:
+    """Organizations from the page state JSON: 25 per search page, the HTML shows only 5."""
+    node = soup.select_one(SELECTORS["search"].get("state_json", "script.state-view"))
+    if not node:
+        return []
+    try:
+        data = json.loads(node.string or node.get_text())
+    except (TypeError, ValueError):
+        return []
+    found = []
+    for entry in (data.get("stack") or []) if isinstance(data, dict) else []:
+        items = ((entry or {}).get("results") or {}).get("items") if isinstance(entry, dict) else None
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and str(item.get("id") or "").isdigit() and item.get("seoname"):
+                found.append(item)
+    return found
 
 
 def http_search_links(page_url: str, soup: BeautifulSoup) -> tuple[list[str], list[str]]:
@@ -648,8 +718,16 @@ def http_search_links(page_url: str, soup: BeautifulSoup) -> tuple[list[str], li
             if match:
                 businesses.append("https://yandex.ru" + match.group())
                 break
+    seen = {org_id(url) for url in businesses}
+    for item in _state_items(soup):
+        seoname = re.sub(r"[^\w-]", "", str(item["seoname"]))
+        if str(item["id"]) not in seen and seoname:
+            seen.add(str(item["id"]))
+            businesses.append(f"https://yandex.ru/maps/org/{seoname}/{item['id']}/")
     for anchor in soup.select(SELECTORS["search"]["next_pages"]):
         url = urljoin(page_url, anchor.get("href", ""))
+        # From non-Russian IPs yandex.ru redirects to yandex.com; keep those pages too.
+        url = normalize_yandex_url(url)
         parsed = urlparse(url)
         if parsed.hostname == "yandex.ru" and parsed.path.startswith("/maps/") and "page" in dict(parse_qsl(parsed.query)):
             pages.append(url)
@@ -667,7 +745,7 @@ def _link_known_desktop_result(identity: str, params: dict, parse_run_id: str | 
     if not parse_run_id:
         return
     item = db.business(identity)
-    if not item or item.get("site_type") not in params.get("types", []):
+    if not item or not fits(item, params):
         return
     address = normalized(item.get("address") or "")
     city = normalized(params.get("city") or "")
@@ -675,12 +753,68 @@ def _link_known_desktop_result(identity: str, params: dict, parse_run_id: str | 
         db.link_parse_run_business(parse_run_id, identity)
 
 
+SITE_CHECK_WORKERS = 6     # third-party sites, not Yandex: safe to check in parallel
+CARD_PAUSE = (0.25, 0.5)   # between two Yandex card requests (one at a time)
+
+
+class _Timing:
+    """Seconds spent per stage of one search, written to the job progress and the log (no URLs)."""
+
+    def __init__(self):
+        self.data: dict[str, float] = {}
+        self.counts: dict[str, int] = {}
+
+    def add(self, stage: str, started: float) -> None:
+        self.data[stage] = self.data.get(stage, 0.0) + time.perf_counter() - started
+        self.counts[stage] = self.counts.get(stage, 0) + 1
+
+    def snapshot(self) -> dict:
+        return {key: {"s": round(value, 2), "n": self.counts.get(key, 0)} for key, value in self.data.items()}
+
+
+def _site_check(site: str) -> tuple[str | None, bool]:
+    try:
+        return fetch_site(site)
+    except Exception:
+        return None, True
+
+
+def _detail_phase(job: dict, session: requests.Session, review_limit: int, progress, timing: _Timing) -> None:
+    """Pass 2: reviews and photo count for the cards found by this job. Cards are already in «Лиды»."""
+    items = db.job_detail_items(job["id"], review_limit)
+    for index, item in enumerate(items, start=1):
+        cancel.check()
+        progress(phase="details", details_done=index - 1, details_total=len(items))
+        base = str(item["map_url"]).rstrip("/") + "/"
+        try:
+            if item.get("photo_count") is None:
+                started = time.perf_counter()
+                photo_count = collect_gallery_photo_count_http(session, base + "gallery/")
+                timing.add("gallery", started)
+                if photo_count is not None:
+                    db.set_business_photo_count(item["id"], photo_count)
+            if review_limit and item.get("needs_reviews"):
+                started = time.perf_counter()
+                collect_reviews_http(session, base + "reviews/", item["id"], review_limit)
+                timing.add("reviews", started)
+        except SearchStopped:
+            raise
+        except Exception as exc:
+            _log_parser_event(logging.WARNING, "business_details_failed", business_id=item["id"],
+                              error_type=type(exc).__name__)
+    if items:
+        progress(phase="details", details_done=len(items), details_total=len(items))
+
+
 def run_search_http(job: dict) -> dict:
+    """Pass 1 finds cards up to the target (Yandex requests one at a time, sites checked in
+    parallel); pass 2 adds reviews and photo counts. «Остановить» works in both passes."""
     params = job["params"]
     desktop_details = bool(params.get("_desktop_details"))
     parse_run_id = params.get("_desktop_parse_run_id") if desktop_details else None
-    review_limit = min(100, max(0, int(params.get("review_limit", 20)))) if desktop_details else 0
+    review_limit = min(100, max(0, int(params.get("review_limit", 20) or 0))) if desktop_details else 0
     target = params["count"]
+    wanted = set(params.get("types") or [])
     max_scanned = min(1000, max(80, target * 10))
     deadline = time.monotonic() + 3600
     known = db.known_ids()
@@ -688,141 +822,171 @@ def run_search_http(job: dict) -> dict:
     checked = db.checked_ids(search_key)
     seen_orgs, seen_pages = set(), set()
     matched = db.job_result_count(job["id"]) if desktop_details else 0
-    scanned = skipped = skipped_checked = errors = 0
+    counters = {"scanned": 0, "skipped": 0, "skipped_checked": 0, "errors": 0}
     empty_queries = 0
+    timing = _Timing()
+    started_at = time.monotonic()
     queries = list(dict.fromkeys((
         f"{params['country']} {params['city']} {params['niche']}",
         f"{params['niche']} {params['city']}",
     )))
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"})
-    if desktop_details:
-        for pending_review in db.incomplete_job_review_items(job["id"], review_limit):
-            try:
-                _, profile_html = request_page(session, pending_review["map_url"])
-                row = parse_org_html(pending_review["map_url"], profile_html, review_limit)
-                if row.get("id") != pending_review["id"]:
+    pool = ThreadPoolExecutor(max_workers=SITE_CHECK_WORKERS, thread_name_prefix="LEM site check")
+    pending: list[tuple[str, dict, object]] = []   # (url, row, future) waiting for a site check
+
+    def progress(**extra) -> None:
+        elapsed = max(1.0, time.monotonic() - started_at)
+        db.update_job(job["id"], progress={
+            "matched": matched, "scanned": counters["scanned"], "skipped_existing": counters["skipped"],
+            "skipped_checked": counters["skipped_checked"], "errors": counters["errors"], "target": target,
+            "per_minute": round(counters["scanned"] * 60 / elapsed, 1), "timing": timing.snapshot(),
+            "phase": "cards", "stopping": cancel.requested(), **extra})
+
+    def result(reason: str, **extra) -> dict:
+        _log_parser_event(logging.INFO, "search_timing", job_id=job["id"], scanned=counters["scanned"],
+                          matched=matched, seconds=round(time.monotonic() - started_at, 1),
+                          timing=timing.snapshot())
+        return {"matched": matched, "scanned": counters["scanned"], "skipped_existing": counters["skipped"],
+                "skipped_checked": counters["skipped_checked"], "errors": counters["errors"],
+                "seconds": round(time.monotonic() - started_at, 1), "timing": timing.snapshot(),
+                "reason": reason, **extra}
+
+    def finish(row: dict) -> None:
+        """Save a classified card when it fits; remember it as checked for this search."""
+        nonlocal matched
+        if row["id"] and fits(row, params):
+            address = normalized(row.get("address") or "")
+            if not address or normalized(params["city"]) in address:
+                tag = (params["niche"], params["country"], params["city"])
+                started = time.perf_counter()
+                if desktop_details:
+                    is_new = db.upsert_business(row, tag, job["id"], store_details=True,
+                                                review_limit=review_limit, parse_run_id=parse_run_id)
+                else:
+                    is_new = db.upsert_business(row, tag, job["id"])
+                timing.add("save", started)
+                if is_new:
+                    matched += 1
+                    known.add(row["id"])
+                    _log_parser_event(logging.INFO, "business_details_saved" if desktop_details
+                                      else "business_saved", business_id=row["id"])
+                else:
+                    counters["skipped"] += 1
+        if row["id"]:
+            db.mark_checked(search_key, row["id"])
+            checked.add(row["id"])
+
+    def drain(block: bool) -> None:
+        """Finish cards whose site check is done (all of them when ``block``)."""
+        while pending and (block or pending[0][2].done()):
+            _, row, future = pending.pop(0)
+            started = time.perf_counter()
+            html, failed = cancel.wait(future)
+            timing.add("site_wait", started)
+            finish(apply_site_check(row, html, failed))
+
+    def might_fit(row: dict) -> bool:
+        """A site check can only turn the card into weak_site/unavailable; skip it when those are not wanted."""
+        return (int(row.get("reviews") or 0) >= min_reviews(params)
+                and bool(wanted & {"weak_site", "unavailable"}))
+
+    try:
+        for query in queries:
+            cancel.check()
+            queue = [f"https://yandex.ru/maps/?text={quote(query)}"]
+            while (queue and counters["scanned"] < max_scanned and matched < target
+                   and time.monotonic() < deadline and len(seen_pages) < 200):
+                page_url = queue.pop(0)
+                if page_url in seen_pages:
                     continue
-                db.refresh_business(row, store_details=True, review_limit=review_limit)
-                if review_limit:
-                    collect_reviews_http(session, row["review_url"], row["id"], review_limit)
-                _log_parser_event(logging.INFO, "interrupted_review_collection_resumed",
-                                  business_id=row["id"], stored=db.business_review_count(row["id"]))
-            except SearchStopped as exc:
-                return {"matched": matched, "scanned": scanned, "skipped_existing": skipped,
-                        "skipped_checked": skipped_checked, "errors": errors, "reason": str(exc)}
-            except Exception as exc:
-                _log_parser_event(logging.WARNING, "interrupted_review_collection_failed",
-                                  business_id=pending_review["id"], error_type=type(exc).__name__)
-    for query in queries:
-        pending = [f"https://yandex.ru/maps/?text={quote(query)}"]
-        while pending and scanned < max_scanned and matched < target and time.monotonic() < deadline and len(seen_pages) < 200:
-            page_url = pending.pop(0)
-            if page_url in seen_pages:
-                continue
-            seen_pages.add(page_url)
-            try:
+                seen_pages.add(page_url)
+                started = time.perf_counter()
                 actual_url, body = request_page(session, page_url)
-            except SearchStopped as exc:
-                return {"matched": matched, "scanned": scanned, "skipped_existing": skipped,
-                        "skipped_checked": skipped_checked, "errors": errors, "reason": str(exc)}
-            soup = BeautifulSoup(body, "html.parser")
-            links, next_pages = http_search_links(actual_url, soup)
-            if not links and explicit_no_results(soup):
-                empty_queries += 1
-                continue
-            if not links and len(seen_pages) == 1:
-                return run_search_browser(job)
-            for next_page in next_pages:
-                if next_page not in seen_pages and next_page not in pending:
-                    pending.append(next_page)
-            for url in links:
-                identity = org_id(url)
-                if not identity or identity in seen_orgs:
+                soup = BeautifulSoup(body, "html.parser")
+                links, next_pages = http_search_links(actual_url, soup)
+                timing.add("search_page", started)
+                if not links and explicit_no_results(soup):
+                    empty_queries += 1
                     continue
-                seen_orgs.add(identity)
-                resume_existing = desktop_details and db.business_needs_review_resume(
-                    job["id"], identity, review_limit)
-                if identity in known and not resume_existing:
-                    _link_known_desktop_result(identity, params, parse_run_id)
-                    skipped += 1
-                    continue
-                if identity in checked and not resume_existing:
-                    skipped_checked += 1
-                    continue
-                if scanned >= max_scanned or matched >= target or time.monotonic() >= deadline:
-                    break
-                scanned += 1
-                card_html = None
-                try:
-                    _, card_html = request_page(session, url)
-                    row = parse_org_html(url, card_html, review_limit)
-                    if row["id"] and row["site_type"] in params["types"]:
-                        address = normalized(row.get("address") or "")
-                        if not address or normalized(params["city"]) in address:
-                            resume_reviews = desktop_details and db.business_needs_review_resume(
-                                job["id"], row["id"], review_limit)
-                            if desktop_details:
-                                is_new = db.upsert_business(row, (params["niche"], params["country"], params["city"]),
-                                    job["id"], store_details=True, review_limit=review_limit,
-                                    parse_run_id=parse_run_id)
-                            else:
-                                is_new = db.upsert_business(row, (params["niche"], params["country"], params["city"]),
-                                    job["id"])
-                            if is_new or resume_reviews:
-                                if is_new:
-                                    matched += 1
-                                    known.add(row["id"])
-                                if desktop_details and row.get("details", {}).get("photo_count") is None:
-                                    photo_count = collect_gallery_photo_count_http(session, row["gallery_url"])
-                                    if photo_count is not None:
-                                        row["details"]["photo_count"] = photo_count
-                                        db.refresh_business(row, store_details=True, review_limit=review_limit)
-                                if desktop_details and review_limit:
-                                    collect_reviews_http(session, row["review_url"], row["id"], review_limit)
-                                _log_parser_event(logging.INFO, "business_details_saved" if desktop_details else "business_saved",
-                                    business_id=row["id"], reviews_collected=db.business_review_count(row["id"]) if desktop_details else 0)
-                            else:
-                                skipped += 1
-                    if row["id"]:
-                        db.mark_checked(search_key, row["id"])
-                        checked.add(row["id"])
-                except SearchStopped as exc:
-                    return {"matched": matched, "scanned": scanned, "skipped_existing": skipped,
-                            "skipped_checked": skipped_checked, "errors": errors, "reason": str(exc)}
-                except Exception as exc:
-                    errors += 1
-                    if desktop_details:
-                        try:
-                            save_failed_card_html(url, card_html, exc)
-                        except Exception as debug_error:
-                            _log_parser_event(logging.WARNING, "parser_debug_html_failed",
-                                business_id=org_id(url), error_type=type(debug_error).__name__)
-                    _log_parser_event(logging.WARNING, "organization_parse_failed",
-                        business_id=org_id(url), error_type=type(exc).__name__)
-                    db.update_job(job["id"], progress={"matched": matched, "scanned": scanned,
-                                                        "skipped_existing": skipped, "skipped_checked": skipped_checked,
-                                                        "errors": errors, "last_error": type(exc).__name__})
-                db.update_job(job["id"], progress={"matched": matched, "scanned": scanned,
-                                                    "skipped_existing": skipped, "skipped_checked": skipped_checked,
-                                                    "errors": errors, "target": target})
-                time.sleep(random.uniform(0.25, 0.5))
-        if matched >= target or scanned >= max_scanned or time.monotonic() >= deadline:
-            break
+                if not links and len(seen_pages) == 1:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    return run_search_browser(job)
+                queue.extend(page for page in next_pages if page not in seen_pages and page not in queue)
+                for url in links:
+                    cancel.check()
+                    drain(block=False)
+                    identity = org_id(url)
+                    if not identity or identity in seen_orgs:
+                        continue
+                    seen_orgs.add(identity)
+                    if identity in known:
+                        _link_known_desktop_result(identity, params, parse_run_id)
+                        counters["skipped"] += 1
+                        continue
+                    if identity in checked:
+                        counters["skipped_checked"] += 1
+                        continue
+                    if matched + len(pending) >= target:
+                        drain(block=True)   # enough candidates in flight: see how many really fit
+                    if counters["scanned"] >= max_scanned or matched >= target or time.monotonic() >= deadline:
+                        break
+                    counters["scanned"] += 1
+                    card_html = None
+                    try:
+                        started = time.perf_counter()
+                        _, card_html = request_page(session, url)
+                        timing.add("card_page", started)
+                        started = time.perf_counter()
+                        row = parse_org_html(url, card_html, review_limit, check_site=False)
+                        timing.add("card_parse", started)
+                        if site_needs_check(row) and might_fit(row):
+                            pending.append((url, row, pool.submit(_site_check, row["website"])))
+                        else:
+                            finish(row)   # no site, builder by domain, or cannot fit anyway
+                    except SearchStopped:
+                        raise
+                    except Exception as exc:
+                        counters["errors"] += 1
+                        if desktop_details:
+                            try:
+                                save_failed_card_html(url, card_html, exc)
+                            except Exception as debug_error:
+                                _log_parser_event(logging.WARNING, "parser_debug_html_failed",
+                                                  business_id=org_id(url), error_type=type(debug_error).__name__)
+                        _log_parser_event(logging.WARNING, "organization_parse_failed",
+                                          business_id=org_id(url), error_type=type(exc).__name__)
+                        progress(last_error=type(exc).__name__)
+                    progress()
+                    cancel.sleep(random.uniform(*CARD_PAUSE))
+                drain(block=True)
+                if counters["scanned"]:
+                    progress()
+            if matched >= target or counters["scanned"] >= max_scanned or time.monotonic() >= deadline:
+                break
+        drain(block=True)
+        if counters["scanned"]:
+            progress()
+        if desktop_details:
+            _detail_phase(job, session, review_limit, progress, timing)
+    except SearchStopped as exc:
+        return result(str(exc), blocked=isinstance(exc, YandexBlocked))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        session.close()
     if matched >= target:
         reason = "Цель достигнута"
-    elif scanned >= max_scanned:
+    elif counters["scanned"] >= max_scanned:
         reason = "Достигнут лимит просмотренных карточек"
     elif time.monotonic() >= deadline:
         reason = "Достигнут лимит времени"
     elif len(seen_pages) >= 200:
         reason = "Достигнут лимит страниц выдачи"
-    elif scanned == 0 and empty_queries >= len(queries):
+    elif counters["scanned"] == 0 and empty_queries >= len(queries):
         reason = "Яндекс не нашёл организаций по запросу. Проверьте написание города и ниши"
     else:
         reason = "По этим запросам Яндекс больше не показал новых карточек"
-    return {"matched": matched, "scanned": scanned, "skipped_existing": skipped,
-            "skipped_checked": skipped_checked, "errors": errors, "reason": reason}
+    return result(_with_threshold_hint(reason, matched, params))
 
 
 def run_search(job: dict) -> dict:
@@ -853,7 +1017,7 @@ def run_search_browser(job: dict) -> dict:
         WebDriverWait(driver, 20).until(lambda d: d.find_elements(
             By.CSS_SELECTOR, SELECTORS["search"]["snippets"]) or captcha(d))
         if captcha(driver):
-            raise SearchStopped(block_message(driver))
+            raise SearchBlocked(block_message(driver))
         search_tab = driver.current_window_handle
         driver.switch_to.new_window("tab")
         card_tab = driver.current_window_handle
@@ -913,7 +1077,7 @@ def run_search_browser(job: dict) -> dict:
                 page_html = None
                 try:
                     row = parse_org(driver, url)
-                    if row["id"] and row["site_type"] in params["types"]:
+                    if row["id"] and fits(row, params):
                         # Search is geographically scoped by Yandex. Reject an explicit different city.
                         address = normalized(row.get("address") or "")
                         if not address or normalized(params["city"]) in address:
@@ -967,18 +1131,18 @@ def run_search_browser(job: dict) -> dict:
                 db.update_job(job["id"], progress={"matched": matched, "scanned": scanned,
                                                         "skipped_existing": skipped, "skipped_checked": skipped_checked,
                                                         "errors": errors, "target": target})
-                time.sleep(random.uniform(1.5, 3.0))
+                cancel.sleep(random.uniform(1.5, 3.0))
             if matched >= target:
                 reason = "Цель достигнута"
                 break
             if captcha(driver):
-                raise SearchStopped(block_message(driver))
+                raise SearchBlocked(block_message(driver))
             if stale >= 12:
                 reason = "Новых карточек больше нет"
                 break
             scroll_results(driver)
             scrolls += 1
-            time.sleep(1)
+            cancel.sleep(1)
         if scanned >= max_scanned:
             reason = "Достигнут лимит просмотренных карточек"
         elif time.monotonic() >= deadline:
@@ -986,9 +1150,11 @@ def run_search_browser(job: dict) -> dict:
         elif scrolls >= 200:
             reason = "Достигнут лимит обхода выдачи"
         return {"matched": matched, "scanned": scanned, "skipped_existing": skipped,
-                "skipped_checked": skipped_checked, "errors": errors, "reason": reason}
+                "skipped_checked": skipped_checked, "errors": errors,
+                "reason": _with_threshold_hint(reason, matched, params)}
     except SearchStopped as exc:
         return {"matched": matched, "scanned": scanned, "skipped_existing": skipped,
-                "skipped_checked": skipped_checked, "errors": errors, "reason": str(exc)}
+                "skipped_checked": skipped_checked, "errors": errors, "reason": str(exc),
+                "blocked": isinstance(exc, YandexBlocked)}
     finally:
         quit_driver(driver)

@@ -21,7 +21,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import DATA_DIR, MEDIA_DIR
 from .driver_registry import register, quit_driver
-from .media import MediaError, _result_directory, ensure_space, gallery_url, job_folder
+from .media import MediaBlocked, MediaError, _result_directory, ensure_space, gallery_url, job_folder
 from yandex_images_parser import (
     CATEGORY_DISCOVERY_TIMEOUT,
     MAX_STALE_SCROLLS,
@@ -175,7 +175,7 @@ def wait_for_gallery_sections(driver, timeout: float = CATEGORY_DISCOVERY_TIMEOU
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if page_has_captcha(driver):
-            raise MediaError("Яндекс показал проверку или временное ограничение. Задание остановлено; повторите позже.")
+            raise MediaBlocked("Яндекс показал проверку или временное ограничение. Задание остановлено; повторите позже.")
         labels = _visible_section_labels(driver)
         if labels:
             return labels
@@ -193,6 +193,10 @@ def _make_driver():
     options.add_argument("--window-size=1400,1000")
     options.add_argument("--disable-notifications")
     options.add_argument("--lang=ru-RU")
+    from .driver_registry import profile_argument
+    profile = profile_argument()
+    if profile:
+        options.add_argument(profile)
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(45)
     driver.set_script_timeout(20)
@@ -243,7 +247,7 @@ def _open_gallery(driver, url: str) -> tuple[str, str]:
     validated = gallery_url(url)
     name = open_gallery(driver, validated)
     if page_has_captcha(driver):
-        raise MediaError("Яндекс показал проверку или временное ограничение. Задание остановлено; повторите позже.")
+        raise MediaBlocked("Яндекс показал проверку или временное ограничение. Задание остановлено; повторите позже.")
     if os.getenv("LEM_SAVE_GALLERY_DOM") == "1":
         debug = DATA_DIR / "debug"
         debug.mkdir(parents=True, exist_ok=True)

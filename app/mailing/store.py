@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_at ON events(at);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS batch_exclusions (   -- «Убрать из пачки»: never in a repeat of this batch
+    batch_id INTEGER NOT NULL,
+    business_id TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(batch_id, business_id)
+);
 """
 
 TERMINAL = ("sent", "dry_sent", "skipped", "unreachable", "failed")
@@ -139,6 +146,15 @@ class Store:
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(recipients)")}
+            if "edited" not in columns:  # per-recipient text edited by the owner (redesign 02)
+                conn.execute("ALTER TABLE recipients ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
+            campaign_columns = {row[1] for row in conn.execute("PRAGMA table_info(campaigns)")}
+            # Batches and repeats (next/03): the first campaign of a batch is its root.
+            for name, ddl in (("batch_id", "INTEGER"), ("parent_id", "INTEGER"),
+                              ("stage", "TEXT NOT NULL DEFAULT 'first'")):
+                if name not in campaign_columns:
+                    conn.execute(f"ALTER TABLE campaigns ADD COLUMN {name} {ddl}")
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
 
     @contextmanager

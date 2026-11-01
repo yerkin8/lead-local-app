@@ -18,7 +18,13 @@
     "organization_links": "a[href*='/maps/org/']",
     "next_pages": "a[href*='page=']",
     "scroll_roots": ".search-list-view__list,.search-list-view,.scroll",
-    "captcha": ["form[action*='checkcaptcha']", "input[name*='captcha']", ".SmartCaptcha", ".CheckboxCaptcha"]
+    "captcha": [
+      "form[action*='checkcaptcha']",
+      "input[name*='captcha']",
+      ".SmartCaptcha",
+      ".CheckboxCaptcha"
+    ],
+    "state_json": "script.state-view"
   },
   "structured_data": {
     "json_ld": "script[type='application/ld+json']",
@@ -26,16 +32,16 @@
     "geo_meta": "meta[name='geo.position']"
   },
   "reviews": {
-    "cards": ".business-reviews-card-view",
-    "text": ".business-review-view__body-text, [itemprop='reviewBody']",
-    "rating": "[itemprop='ratingValue'], .business-rating-badge-view__rating",
-    "date": "time[datetime], .business-review-view__date",
+    "cards": ".business-reviews-card-view__review, .business-reviews-card-view",
+    "text": ".business-review-view__body, .business-review-view__body-text, [itemprop='reviewBody']",
+    "rating": "meta[itemprop='ratingValue'], [itemprop='ratingValue'], .business-rating-badge-view__rating",
+    "date": "meta[itemprop='datePublished'], time[datetime], .business-review-view__date",
     "company_response": ".business-review-view__company-response-text",
     "pagination_links": "a[href*='/reviews/'], a[href*='page=']",
     "scroll_container": ".business-reviews-view__list, .scroll__container",
     "max_scrolls": 40,
     "stale_scrolls": 3,
-    "selectors_verified": false
+    "selectors_verified": "2026-11-01: живая страница /reviews/ отдаёт 50 отзывов в .business-reviews-card-view__review"
   },
   "gallery": {
     "photos": "img.media-wrapper__media",

@@ -104,7 +104,7 @@ class RepeatSearchTests(unittest.TestCase):
                 return url, "card"
             return url, listing
 
-        def parse(url, _html):
+        def parse(url, _html, *_args, **_kwargs):
             identity = url.rstrip("/").split("/")[-1]
             return {"id": identity, "name": "Фирма " + identity, "site_type": "no_site",
                     "address": "Казань", "map_url": url}
@@ -116,7 +116,7 @@ class RepeatSearchTests(unittest.TestCase):
              patch.object(lead_parser.db, "known_ids", side_effect=lambda: known_ids(self.path)), \
              patch.object(lead_parser.db, "checked_ids", side_effect=lambda key: checked_ids(key, self.path)), \
              patch.object(lead_parser.db, "mark_checked", side_effect=lambda key, identity: mark_checked(key, identity, self.path)), \
-             patch.object(lead_parser.db, "upsert_business", side_effect=lambda data, tag, job_id: upsert_business(data, tag, job_id, self.path)), \
+             patch.object(lead_parser.db, "upsert_business", side_effect=lambda data, tag, job_id, **kw: upsert_business(data, tag, job_id, self.path, **kw)), \
              patch.object(lead_parser.db, "update_job", side_effect=lambda job_id, **kwargs: update_job(job_id, path=self.path, **kwargs)), \
              patch.object(lead_parser.time, "sleep"):
             first_id = db.create_job("search", params, self.path)
@@ -157,7 +157,7 @@ class RepeatSearchTests(unittest.TestCase):
                 return url, "card"
             return url, listing
 
-        def parse(url, _html):
+        def parse(url, _html, *_args, **_kwargs):
             identity = url.rstrip("/").split("/")[-1]
             return {"id": identity, "name": "Фирма " + identity,
                     "site_type": "weak_site" if identity == "11" else "no_site",
@@ -170,7 +170,7 @@ class RepeatSearchTests(unittest.TestCase):
              patch.object(lead_parser.db, "known_ids", side_effect=lambda: known_ids(self.path)), \
              patch.object(lead_parser.db, "checked_ids", side_effect=lambda key: checked_ids(key, self.path)), \
              patch.object(lead_parser.db, "mark_checked", side_effect=lambda key, identity: mark_checked(key, identity, self.path)), \
-             patch.object(lead_parser.db, "upsert_business", side_effect=lambda data, tag, job_id: upsert_business(data, tag, job_id, self.path)), \
+             patch.object(lead_parser.db, "upsert_business", side_effect=lambda data, tag, job_id, **kw: upsert_business(data, tag, job_id, self.path, **kw)), \
              patch.object(lead_parser.db, "update_job", side_effect=lambda job_id, **kwargs: update_job(job_id, path=self.path, **kwargs)), \
              patch.object(lead_parser.time, "sleep"):
             first_id = db.create_job("search", params, self.path)

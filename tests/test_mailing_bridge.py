@@ -50,6 +50,13 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue({"mailing_overview", "mailing_emergency", "mailing_new", "mailing_run"} <= names)
         self.assertTrue(all(name.startswith("mailing_") for name in names), names)
 
+    def test_keys_can_be_cleared_from_settings(self):
+        self.assertTrue(self.page.mailing_save_keys("31415926", "a" * 32)["ok"])
+        self.assertTrue(self.page.mailing_overview()["data"]["keys_configured"])
+        self.assertTrue(self.page.mailing_clear_keys()["ok"])
+        self.assertFalse(self.page.mailing_overview()["data"]["keys_configured"])
+        self.assertTrue(self.page.mailing_clear_keys()["ok"])  # nothing saved: still fine
+
     def test_errors_are_masked(self):
         result = self.page.mailing_save_keys("31415926", "not-a-hash")
         self.assertFalse(result["ok"])

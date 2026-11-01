@@ -376,9 +376,10 @@ def create_draft(title: str, business_ids: list[str], template_slug: str,
                  overrides: dict[str, str] | None = None) -> dict:
     if not business_ids:
         raise ValueError("Сначала выберите хотя бы одну организацию")
-    template = next((item for item in db.templates() if item["slug"] == template_slug), None)
+    template = db.template(template_slug)  # old flat slugs resolve to their new place
     if not template:
         raise ValueError("Скрипт не найден")
+    template_slug = template["slug"]
     entries = []
     suppressed = db.suppressed_ids()
     for identity in dict.fromkeys(business_ids):

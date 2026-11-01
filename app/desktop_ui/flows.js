@@ -9,9 +9,9 @@ mediaJob = function (job) {
     `<button class="btn" data-open-archive="${E(job.id)}" data-archive-name="${E(name)}">${E(name)} ↗</button>
      <button class="ghost" data-save-archive="${E(job.id)}" data-archive-name="${E(name)}">Сохранить копию</button>`
   ).join(''));
-  const retry = ['done', 'failed'].includes(job.status)
+  const retry = ['done', 'failed', 'blocked'].includes(job.status)
     ? `<button class="ghost" data-repeat-job="${E(job.id)}">Повторить парсинг</button>` : '';
-  const resume = job.kind === 'images' && job.status === 'failed'
+  const resume = job.kind === 'images' && ['failed', 'blocked'].includes(job.status)
     ? `<button class="btn" data-resume-job="${E(job.id)}">Продолжить с сохранённого</button>` : '';
   const remove = !['running', 'queued'].includes(job.status)
     ? `<button class="danger" data-delete-media="${E(job.id)}">Удалить</button>` : '';
@@ -24,31 +24,65 @@ mediaJob = function (job) {
   </div>`;
 };
 
-const baseSettings = settings;
-settings = async function (node) {
-  await baseSettings(node);
-  if (state.config.migration_notice) {
-    node.querySelector('.two-cols')?.insertAdjacentHTML('afterbegin',
-      `<div class="inline-note wide">${E(state.config.migration_notice)}</div>`);
-  }
-  const panel = [...node.querySelectorAll('.panel')].find(x => x.textContent.includes('Данные и резервная копия'));
-  panel?.querySelector('.toolbar')?.insertAdjacentHTML('beforeend',
-    '<button class="btn" data-import-sqlite>Импорт старой SQLite</button><button class="ghost" data-open-logs>Открыть папку логов</button>');
-  const diagnostics = await safe(() => call('debug_html_enabled'));
-  panel?.insertAdjacentHTML('beforeend', `<label class="field" style="margin-top:14px"><span><input type="checkbox" id="debug-html" ${diagnostics ? 'checked' : ''}> Сохранять HTML карточки при ошибке парсинга</span></label><div class="inline-note">По умолчанию выключено. HTML может содержать телефоны и текст отзывов; файлы сохраняются только в локальной папке debug.</div>`);
+// Search jobs: «Остановить» for queued and running ones, the review pass and the speed are shown.
+const JOB_LABELS = { queued: 'В очереди', running: 'В работе', done: 'Готово', failed: 'Ошибка',
+  blocked: 'Капча — Яндекс ограничил, повторите позже', deleting: 'Удаление', stopped: 'Остановлен',
+  interrupted: 'Прервано' };
+jobBadge = function (job) {
+  const stopping = job.status === 'running' && job.progress?.stopping;
+  const label = stopping ? 'Останавливается…' : (JOB_LABELS[job.status] || job.status);
+  const tone = job.status === 'done' ? 'green' : ['failed', 'blocked'].includes(job.status) ? 'warn' : '';
+  return `<span class="chip ${tone}">${E(label)}</span>`;
 };
+function searchStage(job) {
+  const x = job.progress || {};
+  if (job.status !== 'running') return '';
+  if (x.phase === 'details' && x.details_total) {
+    return `Карточки найдены, догружаю отзывы и фото: ${E(x.details_done ?? 0)} из ${E(x.details_total)}`;
+  }
+  return x.per_minute ? `Ищу карточки · примерно ${E(x.per_minute)} в минуту` : 'Ищу карточки';
+}
+searchJob = function (j) {
+  const p = j.params || {}, r = j.result || {}, x = j.progress || {};
+  const active = ['queued', 'running'].includes(j.status);
+  const stop = active && !x.stopping ? `<button class="ghost" data-stop-job="${E(j.id)}">Остановить</button>` : '';
+  const stage = searchStage(j);
+  const note = j.status === 'stopped'
+    ? `Остановлен. Найденные до остановки (${E(r.matched ?? x.matched ?? 0)}) — в «Лидах».`
+    : j.error && j.status !== 'stopped' ? '' : r.reason || '';
+  return `<div class="row" data-activity-kind="search" data-activity-id="${E(j.id)}"><div class="row-head"><div>
+    <span class="row-title">${E(p.niche)} · ${E(p.city)}</span>
+    <div class="muted small">Цель ${E(p.count)} новых · отзывов ${E(p.review_limit ?? 20)} · ${E(LeadNav.localTime(j.created_at))}</div></div>
+    <div class="row-actions">${jobBadge(j)}${stop}<button class="btn" data-search-results="${E(j.id)}">Результаты</button></div></div>
+    <div class="chips"><span class="chip green">Новых ${E(r.matched ?? x.matched ?? 0)}</span><span class="chip">Уже в базе ${E(r.skipped_existing ?? x.skipped_existing ?? 0)}</span><span class="chip">Проверены ранее ${E(r.skipped_checked ?? x.skipped_checked ?? 0)}</span><span class="chip">Просмотрены ${E(r.scanned ?? x.scanned ?? 0)}</span><span class="chip">Ошибки ${E(r.errors ?? x.errors ?? 0)}</span></div>
+    ${stage ? `<div class="inline-note">${stage}</div>` : ''}
+    ${j.error && j.status !== 'stopped' ? `<div class="inline-note error-note">${E(j.error)}</div>` : note ? `<div class="inline-note">${E(note)}</div>` : ''}</div>`;
+};
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-stop-job]');
+  if (!button) return;
+  event.stopPropagation();
+  button.disabled = true;
+  safe(async () => {
+    const answer = await call('search_stop', button.dataset.stopJob);
+    toast(answer?.status === 'stopped' ? 'Поиск остановлен' : 'Останавливаю поиск — найденное сохранится');
+    if (state.view === 'search') await render();
+  });
+}, true);
+
+// «Настройки» are built in settings.js.
 
 const baseSearch = search;
 search = async function (node) {
   await baseSearch(node);
   node.querySelector('#search-form .form-grid')?.insertAdjacentHTML('beforeend',
-    '<label class="field">Отзывы на организацию<input name="review_limit" type="number" min="0" max="100" value="20"><small class="muted">0 отключает сбор; максимум 100</small></label>');
+    `<label class="field">Отзывы на организацию<input name="review_limit" type="number" min="0" max="100" value="${E(state.prefs?.review_limit ?? 20)}"><small class="muted">0 отключает сбор; максимум 100 · по умолчанию из Настроек</small></label>`);
 };
 
 const baseCall = call;
 call = async function (method, ...args) {
   if (method === 'search_start' && args[0] && args[0].review_limit === undefined) {
-    args[0].review_limit = Number(document.querySelector('#search-form [name="review_limit"]')?.value ?? 20);
+    args[0].review_limit = Number(document.querySelector('#search-form [name="review_limit"]')?.value ?? state.prefs?.review_limit ?? 20);
   }
   return baseCall(method, ...args);
 };
@@ -85,39 +119,6 @@ detail = async function (node) {
   }
 };
 
-document.addEventListener('change', event => {
-  if (event.target.id !== 'debug-html') return;
-  safe(async () => {
-    await call('set_debug_html_enabled', event.target.checked);
-    toast(event.target.checked ? 'Диагностическое сохранение включено' : 'Диагностическое сохранение выключено');
-  });
-});
-
-const baseBusinesses = businesses;
-businesses = async function (node) {
-  await baseBusinesses(node);
-  const input = node.querySelector('#business-filter');
-  const list = node.querySelector('#business-list');
-  if (!input || !list) return;
-  list.insertAdjacentHTML('afterend',
-    '<button class="btn" data-load-businesses style="margin-top:12px">Показать ещё</button>');
-  state.businessQuery = '';
-  state.businessOffset = 50;
-  let timer;
-  input.oninput = () => {
-    clearTimeout(timer);
-    timer = setTimeout(async () => {
-      state.businessQuery = input.value.trim();
-      const rows = await safe(() => call('businesses', {q: state.businessQuery, limit: 50}));
-      if (!rows) return;
-      state.businessOffset = rows.length;
-      list.innerHTML = rows.length ? rows.map(b => businessRow(b)).join('')
-        : empty('Ничего не найдено');
-      node.querySelector('[data-load-businesses]').hidden = rows.length < 50;
-    }, 250);
-  };
-  node.querySelector('[data-load-businesses]').hidden = list.children.length < 50;
-};
 
 const baseMedia = media;
 media = async function (node) {
@@ -211,20 +212,10 @@ document.addEventListener('click', event => {
       const target = await call('media_save', button.dataset.saveArchive, button.dataset.archiveName);
       if (target) toast(`Копия сохранена: ${target}`);
     });
-  } else if (button.hasAttribute('data-load-businesses')) {
-    event.stopImmediatePropagation();
-    safe(async () => {
-      const rows = await call('businesses', {q: state.businessQuery || '', limit: 50,
-        offset: state.businessOffset || 0});
-      document.querySelector('#business-list').insertAdjacentHTML('beforeend',
-        rows.map(b => businessRow(b, true)).join(''));
-      state.businessOffset += rows.length;
-      button.hidden = rows.length < 50;
-    });
   } else if (button.dataset.deleteMedia) {
     event.stopImmediatePropagation();
     safe(async () => {
-      if (!confirm('Удалить этот архив и запись задания? Организация останется в базе.')) return;
+      if (!await LEM.platform.confirm('Удалить этот архив и запись задания? Организация останется в базе.')) return;
       await call('media_delete', button.dataset.deleteMedia);
       toast('Архив удалён'); render();
     });
@@ -233,6 +224,15 @@ document.addEventListener('click', event => {
     safe(async () => {
       const result = await call('import_sqlite');
       if (result) toast(`Перенесено ${result.imported} карточек и ${result.archive_folders} папок медиа`);
+      render();
+    });
+  } else if (button.hasAttribute('data-replace-database')) {
+    event.stopImmediatePropagation();
+    safe(async () => {
+      if (!await LEM.platform.confirm('Заменить рабочую базу другим файлом? Текущая база сначала сохранится в резервную копию, затем выбранный файл станет рабочей базой. Объединения не будет.')) return;
+      const result = await call('replace_database');
+      if (result) toast(`База заменена: ${result.businesses} организаций. Резервная копия сохранена`);
+      state.config = await call('bootstrap');
       render();
     });
   } else if (button.hasAttribute('data-open-logs')) {
@@ -289,13 +289,6 @@ document.addEventListener('click', event => {
 }, true);
 
 // The media source is exclusive: a selected card never reads a stale manual URL.
-const baseDashboard = dashboard;
-dashboard = async function (node) {
-  await baseDashboard(node);
-  const label = [...node.querySelectorAll('.metric label')].find(x => x.textContent === 'Медиа-архивов');
-  if (label) label.textContent = 'Результатов медиа';
-};
-
 media = async function (node) {
   setHeader('Медиа', 'Галерея и товары для организации, сохранённые в обычных папках');
   const [rows, jobs] = await Promise.all([
@@ -433,6 +426,9 @@ function showFirstRunWizard() {
     <h2 id="setup-title">Добро пожаловать в LeadEqualMoney</h2>
     <p>Приложение работает локально: можно вести базу, искать организации и собирать медиа.</p>
     <div class="inline-note"><strong>Telegram подключается только в разделе «Рассылка».</strong> Там вы вводите свои api_id и api_hash и входите в свой аккаунт; ключи и сессии шифруются и не покидают этот компьютер. Кнопка «Проверить ТГ» только формирует ссылки из номеров карточки и ключей не требует.</div>
+    <label class="field">Ключ OpenRouter для ИИ-чата <span class="muted small">· необязательно, можно позже в «Настройках»</span>
+      <input id="setup-ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-v1-…"></label>
+    <p class="small muted">Ключ свой у каждого пользователя: создайте его на openrouter.ai/settings/keys. Он шифруется для этой учётной записи Windows.</p>
     <p class="small muted">Папка данных: ${E(state.config.data_dir)}</p>
     <div class="toolbar"><button class="btn primary" type="button" data-setup-continue>Начать работу</button></div>
   </section>`;
@@ -444,6 +440,10 @@ function showFirstRunWizard() {
 
 async function finishFirstRun(button) {
   try {
+    const keyInput = document.querySelector('#setup-ai-key');
+    const key = keyInput?.value.trim();
+    if (keyInput) keyInput.value = '';
+    if (key) await call('ai_key_save', key);  // a wrong key stops here with a readable error; setup stays open
     await call('complete_setup');
     state.config.first_run = false;
     const dialog = button.closest('dialog');
@@ -454,147 +454,13 @@ async function finishFirstRun(button) {
   }
 }
 
-window.addEventListener('pywebviewready', () => setTimeout(showFirstRunWizard, 250));
+if (LEM.kind === 'desktop') LEM.onReady(() => setTimeout(showFirstRunWizard, 250));
 document.addEventListener('click', event => {
   const button = event.target.closest('[data-setup-continue]');
   if (!button) return;
   event.preventDefault(); event.stopImmediatePropagation();
   finishFirstRun(button);
 }, true);
-
-// The desktop Base is organized by parse run. Legacy cards without a run are
-// surfaced virtually by the backend and are never rewritten during browsing.
-state.baseLevel ||= 'niches';
-state.baseNiche = state.baseNiche || null;
-state.baseCity = state.baseCity || null;
-state.baseRunId = state.baseRunId || null;
-
-function baseBreadcrumb(parts) {
-  const node = document.querySelector('#breadcrumb');
-  if (!node) return;
-  node.innerHTML = parts.map((part, index) => index < parts.length - 1
-    ? `<button type="button" class="breadcrumb-action" data-base-level="${E(part.level)}">${E(part.label)}</button>`
-    : `<span aria-current="page">${E(part.label)}</span>`).join('<span class="breadcrumb-separator" aria-hidden="true">›</span>');
-}
-
-function baseDate(value) {
-  if (!value) return 'Ожидает запуска';
-  return String(value).replace('T', ' ').slice(0, 16);
-}
-
-function baseExportButton(scope, title) {
-  return `<button type="button" class="btn" data-base-export='${E(JSON.stringify(scope))}'>Экспорт ${E(title)}</button>`;
-}
-
-async function loadBaseRunBusinesses(append = false) {
-  const list = document.querySelector('#base-business-list');
-  if (!list || !state.baseRunId) return;
-  if (!append) state.baseOffset = 0;
-  const filters = {
-    q: state.baseQuery || '', status: state.baseStatus || '', site_type: state.baseSiteType || '',
-    limit: 50, offset: state.baseOffset || 0,
-  };
-  const rows = await safe(() => call('parse_run_businesses', state.baseRunId, filters));
-  if (!rows) return;
-  if (append && rows.length) list.insertAdjacentHTML('beforeend', rows.map(businessRow).join(''));
-  else if (!append) list.innerHTML = rows.length ? rows.map(businessRow).join('') : empty('Организации не найдены');
-  state.baseOffset = (state.baseOffset || 0) + rows.length;
-  const more = document.querySelector('[data-base-more]');
-  if (more) more.hidden = rows.length < 50;
-}
-
-businesses = async function (node) {
-  state.baseLevel ||= 'niches';
-  const level = state.baseLevel;
-  if (level === 'niches') {
-    state.baseNiche = state.baseCity = state.baseRunId = null;
-    setHeader('База', 'Организации сгруппированы по нише, городу и запуску парсинга');
-    baseBreadcrumb([{label: 'База', level: 'niches'}]);
-    const items = await call('parse_niches');
-    node.innerHTML = `<section class="panel base-hierarchy"><div class="panel-head"><div><span class="section-kicker">КАТЕГОРИИ</span><h2>Ниши</h2><p>Каждый новый поиск сохраняется отдельным запуском.</p></div><div class="toolbar"><button class="btn" data-action="import">Импорт XLSX</button><button class="btn" data-action="export">Экспорт всей базы</button><button class="btn primary" data-nav="search">Новый поиск</button></div></div>
-      ${items.length ? '<div id="base-folder-grid" class="glass-folder-grid" aria-label="Ниши базы"></div>' : `<div class="base-empty">${empty('База пока пуста', 'Запустите первый парсинг или импортируйте организации из XLSX.')}<button class="btn primary" data-nav="search">Начать поиск</button></div>`}</section>`;
-    if (items.length) glassFolderCards.mount(node.querySelector('#base-folder-grid'), items.map(item => ({
-      key: item.key, title: item.name,
-      summary: `${item.city_count} ${item.city_count === 1 ? 'город' : 'городов'} · ${item.organization_count} организаций`,
-      moreCount: item.more_city_count || 0,
-      openData: {'data-base-open-niche': item.key, 'data-base-label': item.name},
-      exportScope: {level: 'niche', niche_key: item.key},
-      files: (item.recent_cities || []).map(city => ({
-        title: city.name, meta: `${city.organization_count} организаций${city.latest_at ? ` · ${baseDate(city.latest_at)}` : ''}`,
-        data: {'data-base-folder-file-niche': item.key, 'data-base-folder-file-niche-label': item.name,
-          'data-base-folder-file-city': city.key, 'data-base-folder-file-city-label': city.name},
-      })),
-    })));
-    return;
-  }
-
-  if (level === 'cities') {
-    setHeader(state.baseNicheLabel || 'Ниша', 'Города и число найденных организаций');
-    baseBreadcrumb([{label: 'База', level: 'niches'}, {label: state.baseNicheLabel || 'Ниша', level: 'cities'}]);
-    const [items, niches] = await Promise.all([call('parse_cities', state.baseNiche), call('parse_niches')]);
-    const niche = niches.find(item => item.key === state.baseNiche);
-    node.innerHTML = `<section class="panel base-hierarchy"><div class="panel-head"><div><span class="section-kicker">НИША</span><h2>${E(state.baseNicheLabel || niche?.name || 'Ниша')}</h2><p>${E(niche?.organization_count || 0)} организаций в этой нише</p></div>${baseExportButton({level: 'niche', niche_key: state.baseNiche}, 'ниши')}</div>
-      ${items.length ? '<div id="base-folder-grid" class="glass-folder-grid" aria-label="Города этой ниши"></div>' : empty('Городов пока нет', 'Запустите поиск в этой нише.')}</section>`;
-    if (items.length) glassFolderCards.mount(node.querySelector('#base-folder-grid'), items.map(item => ({
-      key: `${state.baseNiche}:${item.key}`, title: item.name,
-      summary: `${item.organization_count} организаций · ${item.run_count || 0} запусков`,
-      moreCount: item.more_run_count || 0,
-      openData: {'data-base-open-city': item.key, 'data-base-label': item.name},
-      exportScope: {level: 'city', niche_key: state.baseNiche, city_key: item.key},
-      files: (item.recent_runs || []).map(run => ({
-        title: baseDate(run.display_at || run.started_at), meta: `${run.organization_count} организаций · ${activityLabel(run.status)}`,
-        data: {'data-base-open-run': run.id, 'data-base-label': baseDate(run.display_at || run.started_at),
-          'data-base-folder-run-city': item.key, 'data-base-folder-run-city-label': item.name},
-      })),
-    })));
-    return;
-  }
-
-  if (level === 'runs') {
-    setHeader(state.baseCityLabel || 'Город', 'Запуски парсинга, новые сверху');
-    baseBreadcrumb([{label: 'База', level: 'niches'}, {label: state.baseNicheLabel || 'Ниша', level: 'cities'}, {label: state.baseCityLabel || 'Город', level: 'runs'}]);
-    const items = await call('parse_runs', state.baseNiche, state.baseCity);
-    node.innerHTML = `<section class="panel base-hierarchy"><div class="panel-head"><div><span class="section-kicker">ГОРОД</span><h2>${E(state.baseCityLabel || 'Город')}</h2><p>${items.length} запусков парсинга</p></div>${baseExportButton({level: 'city', niche_key: state.baseNiche, city_key: state.baseCity}, 'города')}</div>
-      ${items.length ? `<div class="base-folder-grid">${items.map(item => `<article class="base-folder"><div><h3>${E(baseDate(item.display_at || item.started_at || item.created_at))}</h3><p>${E(item.organization_count)} организаций · ${E(activityLabel(item.status))}</p></div><button class="btn" data-base-open-run="${E(item.id)}" data-base-label="${E(baseDate(item.display_at || item.started_at || item.created_at))}">Открыть</button></article>`).join('')}</div>` : empty('Запусков пока нет', 'Начните новый поиск, чтобы сохранить первый запуск.')}</section>`;
-    return;
-  }
-
-  if (level === 'businesses') {
-    const [runs, cities] = await Promise.all([call('parse_runs', state.baseNiche, state.baseCity), call('parse_cities', state.baseNiche)]);
-    const run = runs.find(item => item.id === state.baseRunId);
-    const city = cities.find(item => item.key === state.baseCity);
-    state.baseRunLabel ||= run ? baseDate(run.display_at || run.started_at || run.created_at) : 'Запуск';
-    setHeader(state.baseRunLabel, 'Организации этого запуска · карточка, CRM и медиа');
-    baseBreadcrumb([{label: 'База', level: 'niches'}, {label: state.baseNicheLabel || 'Ниша', level: 'cities'}, {label: state.baseCityLabel || city?.name || 'Город', level: 'runs'}, {label: state.baseRunLabel, level: 'businesses'}]);
-    const scope = {level: 'run', niche_key: state.baseNiche, city_key: state.baseCity, run_id: state.baseRunId};
-    node.innerHTML = `<section class="panel"><div class="panel-head"><div><span class="section-kicker">ЗАПУСК · ${E(run?.status ? activityLabel(run.status) : 'Архив')}</span><h2>${E(state.baseRunLabel)}</h2><p>${E(run?.organization_count ?? 0)} организаций</p></div>${baseExportButton(scope, 'запуска')}</div>
-      <div class="toolbar base-filters"><input id="base-run-query" aria-label="Имя или адрес" placeholder="Имя или адрес" value="${E(state.baseQuery || '')}">
-        <select id="base-run-status" aria-label="Фильтр по статусу"><option value="">Все статусы</option>${Object.entries(state.config?.statuses || {}).map(([key, label]) => `<option value="${E(key)}" ${state.baseStatus === key ? 'selected' : ''}>${E(label)}</option>`).join('')}</select>
-        <select id="base-run-site-type" aria-label="Фильтр по типу сайта"><option value="">Все типы сайтов</option><option value="no_site" ${state.baseSiteType === 'no_site' ? 'selected' : ''}>Без сайта</option><option value="weak_site" ${state.baseSiteType === 'weak_site' ? 'selected' : ''}>Конструктор</option><option value="unavailable" ${state.baseSiteType === 'unavailable' ? 'selected' : ''}>Недоступен</option></select>
-      </div><div id="base-business-list" class="list">${empty('Загрузка организаций…')}</div><button type="button" class="btn" data-base-more style="margin-top:12px">Показать ещё</button></section>`;
-    await loadBaseRunBusinesses(false);
-    const query = node.querySelector('#base-run-query');
-    let timer;
-    query.oninput = () => {
-      state.baseQuery = query.value.trim();
-      clearTimeout(timer);
-      timer = setTimeout(() => loadBaseRunBusinesses(false), 250);
-    };
-    node.querySelector('#base-run-status').onchange = event => { state.baseStatus = event.target.value; loadBaseRunBusinesses(false); };
-    node.querySelector('#base-run-site-type').onchange = event => { state.baseSiteType = event.target.value; loadBaseRunBusinesses(false); };
-  }
-};
-
-const baseSetViewWithHierarchy = setView;
-setView = function (view, extra = {}) {
-  if (view === 'businesses') {
-    state.baseLevel = 'niches';
-    state.baseNiche = state.baseCity = state.baseRunId = null;
-    state.baseQuery = state.baseStatus = state.baseSiteType = '';
-    state.baseRunLabel = null;
-  }
-  return baseSetViewWithHierarchy(view, extra);
-};
 
 // Multi-city input creates one independently tracked job for each city.
 const renderSearchWithCities = search;
@@ -611,7 +477,8 @@ search = async function (node) {
     city.replaceWith(area);
     city = area;
     if (city.parentElement?.firstChild?.nodeType === Node.TEXT_NODE) {
-      city.parentElement.firstChild.textContent = 'Города (через запятую, точку с запятой или новую строку)';
+      city.parentElement.firstChild.textContent = 'Города';
+      city.insertAdjacentHTML('afterend', '<small class="muted">Через запятую, точку с запятой или с новой строки</small>');
     }
   }
 };
@@ -631,53 +498,4 @@ document.addEventListener('submit', event => {
     toast(`Создано запусков: ${result.count}`);
     render();
   });
-}, true);
-
-document.addEventListener('click', event => {
-  const button = event.target.closest('button');
-  if (!button) return;
-  if (button.dataset.baseLevel) {
-    event.preventDefault(); event.stopImmediatePropagation();
-    state.baseLevel = button.dataset.baseLevel;
-    if (state.baseLevel === 'niches') state.baseNiche = state.baseCity = state.baseRunId = null;
-    else if (state.baseLevel === 'cities') state.baseCity = state.baseRunId = null;
-    else if (state.baseLevel === 'runs') state.baseRunId = null;
-    render();
-  } else if (button.dataset.baseOpenNiche) {
-    event.preventDefault(); event.stopImmediatePropagation();
-    state.baseNiche = button.dataset.baseOpenNiche;
-    state.baseNicheLabel = button.dataset.baseLabel;
-    state.baseLevel = 'cities'; render();
-  } else if (button.dataset.baseOpenCity) {
-    event.preventDefault(); event.stopImmediatePropagation();
-    state.baseCity = button.dataset.baseOpenCity;
-    state.baseCityLabel = button.dataset.baseLabel;
-    state.baseLevel = 'runs'; render();
-  } else if (button.dataset.baseFolderFileCity) {
-    event.preventDefault(); event.stopImmediatePropagation();
-    state.baseNiche = button.dataset.baseFolderFileNiche;
-    state.baseNicheLabel = button.dataset.baseFolderFileNicheLabel;
-    state.baseCity = button.dataset.baseFolderFileCity;
-    state.baseCityLabel = button.dataset.baseFolderFileCityLabel;
-    state.baseLevel = 'runs'; render();
-  } else if (button.dataset.baseOpenRun) {
-    event.preventDefault(); event.stopImmediatePropagation();
-    state.baseRunId = button.dataset.baseOpenRun;
-    state.baseCity = button.dataset.baseFolderRunCity || state.baseCity;
-    state.baseCityLabel = button.dataset.baseFolderRunCityLabel || state.baseCityLabel;
-    state.baseRunLabel = button.dataset.baseLabel;
-    state.baseLevel = 'businesses';
-    state.baseQuery = state.baseStatus = state.baseSiteType = '';
-    render();
-  } else if (button.hasAttribute('data-base-more')) {
-    event.preventDefault(); event.stopImmediatePropagation();
-    loadBaseRunBusinesses(true);
-  } else if (button.hasAttribute('data-base-export')) {
-    event.preventDefault(); event.stopImmediatePropagation();
-    safe(async () => {
-      const scope = JSON.parse(button.dataset.baseExport);
-      const result = await call('export_scope', scope);
-      if (result) toast(`Экспортировано ${result.count} карточек`);
-    });
-  }
 }, true);

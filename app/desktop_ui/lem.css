@@ -81,6 +81,7 @@
   --accent-action: #1D4ED8;
   --accent-action-hover: #1E40AF;
   --accent-soft-text: #1E3A8A;
+  --on-accent: #FFFFFF;
   --success: #22C55E;
   --success-bg: #DCFCE7;
   --success-border: #86EFAC;
@@ -107,6 +108,11 @@
   --shadow-hover: 0 5px 16px rgba(15, 23, 42, 0.1);
   --shadow-dialog: 0 24px 80px rgba(15, 23, 42, 0.22);
   --scrim: rgba(15, 23, 42, 0.38);
+  /* Funnel / chart shades for «Итоги» (Mini App statistics). */
+  --chart-1: #93C5FD;
+  --chart-2: #60A5FA;
+  --chart-3: #3B82F6;
+  --chart-4: #1D4ED8;
   --focus-ring: 0 0 0 3px rgba(59, 130, 246, 0.25);
   --folder-art-blue: #BFDBFE;
   --folder-art-sky: #BAE6FD;
@@ -143,3 +149,83 @@
   --motion-fast: 140ms ease;
   --motion-base: 180ms ease;
 }
+
+/* Dark theme («Настройки» → «Оформление»): the Mini App palette (lead-mini-app dark.css), every token overridden.
+   html[data-theme] is set in index.html before the first paint. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-primary: #0B1220;
+  --bg-secondary: #151E2E;
+  --bg-hover: #1E293B;
+  --bg-soft: #1A2B4A;
+  --border: #243044;
+  --border-strong: #334155;
+  --text-primary: #E5EAF2;
+  --text-secondary: #94A3B8;
+  --text-disabled: #64748B;
+  --accent: #60A5FA;
+  --accent-hover: #93C5FD;
+  --accent-action: #2563EB;
+  --accent-action-hover: #1D4ED8;
+  --accent-soft-text: #BFDBFE;
+  --on-accent: #FFFFFF;
+  --success: #22C55E;
+  --success-bg: #12301F;
+  --success-border: #1F5132;
+  --success-text: #86EFAC;
+  --warning: #F59E0B;
+  --warning-bg: #3A2A0B;
+  --warning-border: #6B4E12;
+  --warning-text: #FCD34D;
+  --error: #F87171;
+  --error-bg: #3B1515;
+  --error-border: #7F1D1D;
+  --error-text: #FCA5A5;
+  --info: #22D3EE;
+  --info-bg: #0E2E36;
+  --info-border: #155E75;
+  --info-text: #67E8F9;
+  --purple: #A78BFA;
+  --purple-bg: #2A1F47;
+  --purple-border: #4C3A86;
+  --purple-text: #C4B5FD;
+  --log-bg: #0F172A;
+  --log-text: #E2E8F0;
+  --shadow: none;
+  --shadow-hover: 0 5px 16px rgba(0, 0, 0, 0.35);
+  --shadow-dialog: 0 24px 80px rgba(0, 0, 0, 0.6);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --chart-1: #1E3A8A;
+  --chart-2: #1D4ED8;
+  --chart-3: #3B82F6;
+  --chart-4: #60A5FA;
+  --focus-ring: 0 0 0 3px rgba(96, 165, 250, 0.35);
+  --folder-art-blue: #1E3A8A;
+  --folder-art-sky: #0C4A6E;
+  --folder-art-ice: #164E63;
+  --folder-art-indigo: #312E81;
+  --folder-art-mint: #134E4A;
+  --folder-art-fallback: #1E3A8A;
+  --folder-paper: #1E293B;
+  --folder-glass: rgba(21, 30, 46, 0.72);
+  --folder-rim: rgba(255, 255, 255, 0.10);
+  --folder-shadow: 0 18px 38px rgba(0, 0, 0, 0.45);
+  --folder-file-shadow: 0 5px 14px rgba(0, 0, 0, 0.35);
+  --folder-file-shadow-open: 0 12px 22px rgba(0, 0, 0, 0.45);
+  --folder-flap-shadow: 0 9px 24px rgba(0, 0, 0, 0.35);
+  --folder-light: rgba(255, 255, 255, 0.06);
+  --folder-key-border: rgba(255, 255, 255, 0.14);
+  --folder-key-top: #334155;
+  --folder-key-bottom: #1E293B;
+  --folder-key-ink: #E5EAF2;
+  --folder-key-shadow: rgba(0, 0, 0, 0.5);
+  --folder-add-top: #475569;
+  --folder-add-bottom: #0F172A;
+  --folder-dark-glass: rgba(2, 6, 23, 0.82);
+  --folder-dark-ink: #FFFFFF;
+  --folder-dark-muted: rgba(255, 255, 255, 0.65);
+  --folder-menu: rgba(21, 30, 46, 0.97);
+  --folder-menu-shadow: rgba(0, 0, 0, 0.5);
+  --folder-menu-hover: #1E293B;
+}
+:root[data-theme="dark"] .ghost { color: var(--accent); }

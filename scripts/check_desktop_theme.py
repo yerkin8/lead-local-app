@@ -15,8 +15,9 @@ STYLE = ROOT / "app" / "desktop_ui" / "style.css"
 HTML = ROOT / "app" / "desktop_ui" / "index.html"
 APP_JS = ROOT / "app" / "desktop_ui" / "app.js"
 FLOWS_JS = ROOT / "app" / "desktop_ui" / "flows.js"
-FOLDER_CSS = ROOT / "app" / "desktop_ui" / "glass-folder.css"
-FOLDER_JS = ROOT / "app" / "desktop_ui" / "glass-folder.js"
+# Mini App modules brought into Desktop (docs/unify): their styles must use the same tokens.
+UNIFY_FILES = tuple(ROOT / "app" / "desktop_ui" / name for name in
+                    ("leads.css", "ai.css", "leads.js", "today.js", "ai.js", "stats.js", "stage9.js", "desk-shell.js", "settings.js", "mailing.css"))
 FONT_DIR = ROOT / "app" / "desktop_ui" / "fonts"
 
 EXPECTED = {
@@ -85,14 +86,24 @@ def main() -> int:
     html_text = HTML.read_text(encoding="utf-8")
     app_text = APP_JS.read_text(encoding="utf-8")
     flows_text = FLOWS_JS.read_text(encoding="utf-8")
-    tokens = parse_tokens(tokens_text)
+    light_block = re.search(r":root\s*\{(.*?)\}", tokens_text, re.S)
+    dark_block = re.search(r':root\[data-theme="dark"\]\s*\{(.*?)\}', tokens_text, re.S)
+    tokens = parse_tokens(light_block.group(1) if light_block else "")
+    dark = {**tokens, **parse_tokens(dark_block.group(1) if dark_block else "")}
+    if not dark_block:
+        errors.append("Dark theme block :root[data-theme=\"dark\"] is missing")
+    else:
+        missing = sorted(set(re.findall(r"--([a-z0-9-]+)\s*:\s*#", light_block.group(1)))
+                         - set(re.findall(r"--([a-z0-9-]+)\s*:", dark_block.group(1))))
+        if missing:
+            errors.append(f"Dark theme does not override colour tokens: {missing}")
 
     for name, expected in EXPECTED.items():
         actual = tokens.get(name)
         if actual != expected:
             errors.append(f"Token --{name}: expected {expected}, found {actual!r}")
 
-    outside_tokens = (STYLE, HTML, APP_JS, FLOWS_JS, FOLDER_CSS, FOLDER_JS)
+    outside_tokens = (STYLE, HTML, APP_JS, FLOWS_JS, *UNIFY_FILES)
     literal_color = re.compile(
         r"#[0-9a-fA-F]{3,8}(?![0-9a-fA-F])|\b(?:rgba?|hsla?)\s*\("
     )
@@ -100,26 +111,15 @@ def main() -> int:
         if literal_color.search(path.read_text(encoding="utf-8")):
             errors.append(f"Hardcoded color found outside tokens: {path.relative_to(ROOT)}")
 
-    if 'href="glass-folder.css"' not in html_text:
-        errors.append("Glass folder stylesheet is not linked by the desktop page")
-    if '<script src="glass-folder.js"></script>' not in html_text:
-        errors.append("Glass folder behavior is not loaded by the desktop page")
-    folder_css = FOLDER_CSS.read_text(encoding="utf-8")
-    folder_js = FOLDER_JS.read_text(encoding="utf-8")
-    if ".glass-folder-card[data-open] .glass-folder-files" not in folder_css or "pointer-events: auto" not in folder_css:
-        errors.append("Opened folder files must accept pointer input")
-    for fragment in ("aria-expanded", "aria-hidden", "inert", "Escape", "IntersectionObserver", "prefers-reduced-motion"):
-        if fragment not in folder_js and fragment not in folder_css:
-            errors.append(f"Glass folder accessibility/performance support missing: {fragment}")
-    if "data-base-folder-run-city" not in flows_text or "dataset.baseFolderRunCity" not in flows_text:
-        errors.append("Recent runs in city folders must retain their city when opened")
+    if "glass-folder" in html_text:
+        errors.append("Glass folders («База») must stay removed from the desktop page")
 
     pairs = [
         ("Основной текст / фон приложения", "text-primary", "bg-primary", 4.5),
         ("Вторичный текст / фон приложения", "text-secondary", "bg-primary", 4.5),
         ("Вторичный текст / карточка", "text-secondary", "bg-secondary", 4.5),
-        ("Текст кнопки / основное действие", "bg-secondary", "accent-action", 4.5),
-        ("Текст кнопки / действие при наведении", "bg-secondary", "accent-action-hover", 4.5),
+        ("Текст кнопки / основное действие", "on-accent", "accent-action", 4.5),
+        ("Текст кнопки / действие при наведении", "on-accent", "accent-action-hover", 4.5),
         ("Текст статуса / success", "success-text", "success-bg", 4.5),
         ("Текст статуса / warning", "warning-text", "warning-bg", 4.5),
         ("Текст статуса / error", "error-text", "error-bg", 4.5),
@@ -128,8 +128,10 @@ def main() -> int:
         ("Индикатор фокуса / белая поверхность", "accent", "bg-secondary", 3.0),
     ]
     ratios: list[tuple[str, float, float]] = []
-    for label, fg_name, bg_name, minimum in pairs:
-        fg, bg = tokens.get(fg_name), tokens.get(bg_name)
+    themed = [(label, fg, bg, m, tokens) for label, fg, bg, m in pairs]
+    themed += [(f"[тёмная] {label}", fg, bg, m, dark) for label, fg, bg, m in pairs]
+    for label, fg_name, bg_name, minimum, palette in themed:
+        fg, bg = palette.get(fg_name), palette.get(bg_name)
         if not fg or not bg:
             errors.append(f"Missing contrast tokens for {label}: --{fg_name}, --{bg_name}")
             continue
@@ -177,7 +179,6 @@ def main() -> int:
         errors.append("Visible keyboard focus styling is missing")
 
     accessible_fragments = [
-        (app_text, 'aria-label="\\u0418\\u043c\\u044f', "business filter"),
         (flows_text, 'aria-labelledby="telegram-links-title"', "telegram phone links panel"),
         (flows_text, 'data-show-telegram-links', "telegram phone links action"),
     ]

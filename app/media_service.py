@@ -98,7 +98,7 @@ def discover_sections(*, business_id: str | None = None, url: str | None = None)
 
 
 def resume_images(job_id: str) -> dict:
-    """Requeue a failed desktop gallery task while keeping its partial image files."""
+    """Requeue a failed or blocked desktop gallery task while keeping its partial image files."""
     with db.connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT kind,status FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -106,7 +106,7 @@ def resume_images(job_id: str) -> dict:
             raise MediaError("Задание галереи не найдено")
         if row["status"] in {"queued", "running"}:
             pass
-        elif row["status"] != "failed":
+        elif row["status"] not in {"failed", "blocked"}:
             raise MediaError("Продолжить можно только прерванное задание галереи")
         else:
             conn.execute("UPDATE jobs SET status='queued',error=NULL,result='{}',updated_at=? WHERE id=?",

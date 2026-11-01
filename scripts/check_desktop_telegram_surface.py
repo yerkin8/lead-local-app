@@ -6,12 +6,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DESKTOP = ROOT / "app" / "desktop.py"
-UI_PATHS = [
-    ROOT / "app" / "desktop_ui" / "index.html",
-    ROOT / "app" / "desktop_ui" / "app.js",
-    ROOT / "app" / "desktop_ui" / "flows.js",
-    ROOT / "app" / "desktop_ui" / "stage9.js",
-]
+# Every page script except mailing.js, which is checked separately below (it is the new mailing UI).
+UI_PATHS = [ROOT / "app" / "desktop_ui" / "index.html"] + sorted(
+    path for path in (ROOT / "app" / "desktop_ui").glob("*.js") if path.name != "mailing.js")
+
+
+def registry_methods() -> set[str]:
+    """Names in services.SERVICES: the Bridge gets them through the shared registry (desktop.py)."""
+    tree = ast.parse((ROOT / "app" / "services.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+            if getattr(target, "id", "") == "SERVICES":
+                return {name.id for name in ast.walk(node.value) if isinstance(name, ast.Name) and name.id != "fn"}
+    return set()
 RETIRED_UI_MARKERS = (
     "telegram_state", "telegram_configure", "telegram_sign_in", "telegram_request_code",
     "telegram_check_phone", "campaign_start", "campaign_create", "contact_permissions",
@@ -43,10 +51,11 @@ def main() -> int:
     source = DESKTOP.read_text(encoding="utf-8")
     tree = ast.parse(source)
     bridge = next((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Bridge"), None)
-    methods = {node.name for node in bridge.body if isinstance(node, ast.FunctionDef)} if bridge else set()
+    own = {node.name for node in bridge.body if isinstance(node, ast.FunctionDef)} if bridge else set()
+    methods = own | registry_methods()
     if not bridge:
         failures.append("desktop Bridge class is missing")
-    for name in sorted(RETIRED_BRIDGE_METHODS & methods):
+    for name in sorted(RETIRED_BRIDGE_METHODS & methods):  # also in the registry: it is attached to Bridge
         failures.append(f"retired bridge method remains: {name}")
     if "telegram_sender" in source:
         failures.append("desktop entry point still references telegram_sender")

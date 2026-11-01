@@ -585,5 +585,101 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(classify(errors.FloodWaitError(request=None, capture=42)).seconds, 42)
 
 
+class FromLeadsTests(MailingCase):
+    """Redesign 02: campaign from leads selected in «Лиды» and per-recipient texts."""
+
+    def test_campaign_from_selected_leads_keeps_order_and_safety(self):
+        account = self.account()
+        self.service.stop_add("business", "b3")
+        self.orgs[4]["socials"] = []  # b5 has no Telegram username
+        campaign = self.service.create_campaign("Из лидов", {"ids": ["b6", "b3", "b5", "b2", "b6", "nope"]},
+                                                TEMPLATE, [account])
+        rows = [(r["business_id"], r["status"], r["reason"]) for r in campaign["recipients"]]
+        self.assertEqual([r[0] for r in rows], ["b6", "b3", "b5", "b2"])
+        self.assertEqual(rows[1][1:], ("skipped", "В стоп-листе"))
+        self.assertEqual(rows[2][1:], ("skipped", "Нет username Telegram"))
+        self.assertEqual(json.loads(campaign["filters_json"])["ids"][0], "b6")
+        self.assertEqual(campaign["mode"], "dry")
+        self.assertEqual(self.fake.delivered, [])
+
+    def test_no_selected_leads_with_contact(self):
+        account = self.account()
+        with self.assertRaises(ValueError):
+            self.service.create_campaign("Пусто", {"ids": ["nope"]}, TEMPLATE, [account])
+
+    def test_edited_text_is_sent_and_reset_restores_template(self):
+        account = self.account()
+        campaign = self.service.create_campaign("Из лидов", {"ids": ["b1", "b2"]}, TEMPLATE, [account])
+        first, second = campaign["recipients"]
+        with self.assertRaises(ValueError):
+            self.service.set_message(campaign["id"], first["id"], "Привет, [имя]")
+        with self.assertRaises(ValueError):
+            self.service.set_message(campaign["id"], first["id"], "   ")
+        edited = self.service.set_message(campaign["id"], first["id"], "Личный текст для первой")
+        self.assertIn("СТОП", edited["message"])
+        self.service.set_message(campaign["id"], second["id"], "Временный текст")
+        reset = self.service.reset_message(campaign["id"], second["id"])
+        self.assertEqual(reset["message"], second["message"])
+        detail = self.service.campaign(campaign["id"])
+        self.assertEqual([r["edited"] for r in detail["recipients"]], [1, 0])
+        self.service.dry_run(campaign["id"])  # edits survive the dry run
+        self.service.set_message(campaign["id"], first["id"], "Личный текст после сухого запуска")
+        self.live(campaign["id"])
+        texts = dict(self.deliveries())
+        self.assertTrue(any(t.startswith("Личный текст после сухого запуска") for t in texts.values()))
+        self.assertTrue(any(t.startswith("Здравствуйте! Пишу Организация 2") for t in texts.values()))
+        with self.assertRaises(ValueError):  # already sent: text is history
+            self.service.set_message(campaign["id"], first["id"], "Поздно")
+
+    def test_no_edit_while_running(self):
+        account = self.account()
+        campaign = self.service.create_campaign("Из лидов", {"ids": ["b1"]}, TEMPLATE, [account])
+        self.service.enable_live(campaign["id"], "ОТПРАВИТЬ")
+        self.service.mark_running(campaign["id"])
+        with self.assertRaises(ValueError):
+            self.service.set_message(campaign["id"], campaign["recipients"][0]["id"], "Новый")
+
+    def test_auto_script_fits_each_business_site_type(self):
+        account = self.account()
+        self.service._templates = lambda: [{"slug": "site.first", "title": "Сайт", "body": "Сайт для {название}"},
+                                           {"slug": "site.first.redesign", "title": "Редизайн", "body": "Редизайн {название}"}]
+        self.orgs[0]["site_type"], self.orgs[1]["site_type"] = "no_site", "weak_site"
+        campaign = self.service.create_campaign("Авто", {"ids": ["b1", "b2"]}, "auto", [account])
+        texts = [r["message"].split(chr(10))[0] for r in campaign["recipients"]]
+        self.assertEqual(texts, ["Сайт для Организация 1", "Редизайн Организация 2"])
+        first = campaign["recipients"][1]
+        self.service.set_message(campaign["id"], first["id"], "Своё")
+        self.assertTrue(self.service.reset_message(campaign["id"], first["id"])["message"].startswith("Редизайн"))
+
+    def test_one_button_launch_needs_confirm_word_and_batch_limit(self):
+        account = self.account()
+        with self.assertRaises(ValueError):
+            self.service.launch("Пачка", ["b1", "b2"], TEMPLATE, [account], "да")
+        self.assertEqual(self.service.campaigns(), [])  # nothing created without the word
+        self.service.save_policy({"batch_limit": 3})
+        with self.assertRaises(ValueError):
+            self.service.save_policy({"batch_limit": 501})
+        self.service.start()
+        try:
+            launched = self.service.launch("Пачка", [f"b{i}" for i in range(1, 9)], TEMPLATE, [account], "ОТПРАВИТЬ")
+        finally:
+            self.service.shutdown(10)
+        self.assertEqual(launched["mode"], "live")
+        self.assertEqual(launched["counts"]["total"], 3)
+        self.assertIn(launched["status"], ("running", "done"))
+
+    def test_store_adds_edited_column_to_old_database(self):
+        import sqlite3
+        path = self.data / "old.sqlite3"
+        Store(path)
+        conn = sqlite3.connect(path)
+        conn.execute("ALTER TABLE recipients DROP COLUMN edited")  # database of the previous build
+        conn.commit(); conn.close()
+        Store(path)
+        conn = sqlite3.connect(path)
+        self.assertIn("edited", {row[1] for row in conn.execute("PRAGMA table_info(recipients)")})
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

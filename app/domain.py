@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 
 STATUSES = {
     "not_started": "Не начато",
+    "call": "Позвонить",
     "waiting": "Написал",
     "replied": "Ответили",
     "working": "В работе",

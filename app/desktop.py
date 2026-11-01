@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
-from .phone_links import build_telegram_phone_links
 
 APP_NAME = "LeadEqualMoney"
 APP_VERSION = "1.0.0"
@@ -242,12 +241,10 @@ class AlreadyRunningError(RuntimeError):
 _configure_user_data_dir()
 
 # Configure the user profile before importing modules whose paths are fixed at import time.
-from . import db, media_service
+from . import db, media_service, services
 from .config import DATA_DIR
-from .desktop_services import (LocalWorker, backup_database, export_xlsx, import_xlsx,
-                               import_sqlite, refresh_business, search_results,
-                               start_desktop_search)
-from .domain import COUNTRIES, SITE_TYPES, STATUSES
+from .desktop_services import (LocalWorker, backup_database, export_xlsx, import_xlsx, import_sqlite,
+                               replace_database)
 from .mailing.desktop_bridge import MailingBridgeMixin
 
 
@@ -289,9 +286,7 @@ class Bridge(MailingBridgeMixin):
             return {"ok": False, "error": str(exc)}
 
     def bootstrap(self):
-        return self._result(lambda: {"countries": COUNTRIES, "statuses": STATUSES,
-                                     "site_types": sorted(SITE_TYPES), "data_dir": str(DATA_DIR),
-                                     "stats": db.stats(),
+        return self._result(lambda: {**services.bootstrap(), "data_dir": str(DATA_DIR),
                                      "telegram_mtproto_enabled": TELEGRAM_MTPROTO_ENABLED,
                                      "mailing_available": self._mailing is not None,
                                      "first_run": not (DATA_DIR / "first_run_complete").exists(),
@@ -312,118 +307,11 @@ class Bridge(MailingBridgeMixin):
             return True
         return self._result(run)
 
-    def stats(self):
-        return self._result(db.stats)
-
-    def search_start(self, payload):
-        return self._result(start_desktop_search, payload)
-
-    def search_jobs(self):
-        return self._result(lambda: db.list_jobs("search"))
-
-    def search_results(self, job_id):
-        return self._result(search_results, job_id)
-
-    def parse_niches(self):
-        return self._result(db.parse_niches)
-
-    def parse_cities(self, niche_key):
-        return self._result(db.parse_cities, str(niche_key))
-
-    def parse_runs(self, niche_key, city_key):
-        return self._result(db.parse_runs_for_city, str(niche_key), str(city_key))
-
-    def parse_run_businesses(self, run_id, filters=None):
-        options = dict(filters or {})
-        limit = min(200, max(1, int(options.get("limit", 50))))
-        offset = max(0, int(options.get("offset", 0)))
-        query = str(options.get("q", "")).strip()
-        status = str(options.get("status", "")).strip() or None
-        site_type = str(options.get("site_type", "")).strip() or None
-        return self._result(db.parse_run_businesses, str(run_id), query=query, limit=limit,
-                            offset=offset, status=status, site_type=site_type)
-
-    def businesses(self, filters=None):
+    def open_data_dir(self):
         def run():
-            options = dict(filters or {})
-            limit = min(200, max(1, int(options.pop("limit", 50))))
-            offset = max(0, int(options.pop("offset", 0)))
-            return db.list_businesses(options, limit=limit, offset=offset)
-        return self._result(run)
-
-    def business_filter_options(self):
-        return self._result(db.filter_options)
-
-
-    def business(self, identity):
-        return self._result(db.business_full, identity)
-
-    def business_save(self, identity, status=None, note=None):
-        return self._result(lambda: db.business(identity) if db.set_business(identity, status, note) else None)
-
-    def templates(self):
-        return self._result(db.templates)
-
-    def template_save(self, slug, body):
-        def run():
-            text = str(body or "").strip()
-            if not text:
-                raise ValueError("Текст скрипта не может быть пустым")
-            if len(text) > 20000:
-                raise ValueError("Текст скрипта слишком длинный")
-            if not db.save_template(str(slug), text):
-                raise ValueError("Скрипт не найден")
+            os.startfile(str(DATA_DIR))
             return True
         return self._result(run)
-
-    def business_scripts(self, identity):
-        def run():
-            from .domain import render_template
-            from .script_templates import FIRST_BY_SITE_TYPE
-            item = db.business(str(identity))
-            if not item:
-                raise ValueError("Организация не найдена")
-            rows = db.templates()
-            preferred = FIRST_BY_SITE_TYPE.get(item.get("site_type"), "first")
-            return {"preferred": preferred, "items": [
-                {**row, "text": render_template(row["body"], item)} for row in rows
-            ]}
-        return self._result(run)
-
-    def frontend_error(self, message, source="", line=0, column=0):
-        def run():
-            logging.getLogger("LeadEqualMoney.frontend").error(
-                "JS: %s (%s:%s:%s)", str(message)[:2000], str(source)[:500], line, column)
-            return True
-        return self._result(run)
-
-    def business_refresh(self, identity):
-        return self._result(refresh_business, identity)
-
-    def debug_html_enabled(self):
-        return self._result(db.desktop_diagnostics_enabled)
-
-    def set_debug_html_enabled(self, enabled):
-        return self._result(db.set_desktop_diagnostics_enabled, bool(enabled))
-
-    def media_start(self, kind, payload):
-        return self._result(media_service.start, kind, **payload)
-
-    def media_discover_sections(self, payload):
-        return self._result(media_service.discover_sections, **payload)
-
-    def media_resume(self, job_id):
-        return self._result(media_service.resume_images, job_id)
-
-    def media_jobs(self, business_id=None):
-        return self._result(media_service.list_jobs, business_id)
-
-    def activity_snapshot(self, known=None):
-        request = dict(known) if isinstance(known, dict) else {}
-        topics = request.get("topics", ["search", "media"])
-        request["topics"] = [topic for topic in topics if topic in {"search", "media"}] \
-            if isinstance(topics, (list, tuple, set)) else ["search", "media"]
-        return self._result(db.activity_snapshot, request)
 
     def media_open(self, job_id, name=""):
         return self._result(media_service.open_archive, job_id, name)
@@ -434,9 +322,6 @@ class Bridge(MailingBridgeMixin):
                                    file_types=("ZIP (*.zip)",)) if name else self._dialog("FOLDER"))
             return media_service.copy_archive(job_id, name, target) if target else None
         return self._result(run)
-
-    def media_delete(self, job_id):
-        return self._result(media_service.delete, job_id)
 
     def import_xlsx(self):
         def run():
@@ -467,13 +352,12 @@ class Bridge(MailingBridgeMixin):
             return import_sqlite(path) if path else None
         return self._result(run)
 
-    def telegram_phone_links(self, business_id):
-        def build():
-            item = db.business(business_id)
-            if not item:
-                raise ValueError("Организация не найдена")
-            return build_telegram_phone_links(item.get("phones", []))
-        return self._result(build)
+    def replace_database(self):
+        """Make another app base the working one (backup first); the base is chosen in a dialog."""
+        def run():
+            path = self._dialog("OPEN", file_types=("SQLite (*.sqlite3;*.sqlite;*.db)",))
+            return replace_database(path) if path else None
+        return self._result(run)
 
     def open_external(self, url):
         def run():
@@ -486,6 +370,19 @@ class Bridge(MailingBridgeMixin):
             webbrowser.open(parsed.geturl(), new=2)
             return True
         return self._result(run)
+
+
+
+def _shared_method(name):
+    def method(self, *args):
+        return self._result(services.SERVICES[name], *args)
+    method.__name__ = name
+    return method
+
+
+for _name in services.SERVICES:
+    if not hasattr(Bridge, _name):
+        setattr(Bridge, _name, _shared_method(_name))
 
 
 @contextmanager
@@ -558,14 +455,16 @@ def main():
                 geometry = _initial_window_geometry(DATA_DIR / "window.json")
                 geometry_store = _WindowGeometryStore(DATA_DIR / "window.json", geometry)
                 window_options = {key: geometry[key] for key in ("x", "y")}
+                # The saved theme goes into the page address so it applies before the first paint.
+                theme = services.ui_settings()["theme"]
                 window = webview.create_window(
                     APP_NAME,
-                    page_path.resolve().as_uri(),
+                    page_path.resolve().as_uri() + "#theme=" + theme,
                     js_api=bridge,
                     width=int(geometry["width"] or 1366),
                     height=int(geometry["height"] or 850),
                     min_size=(1024, 700),
-                    background_color="#F8FAFC",
+                    background_color="#0B1220" if theme == "dark" else "#F8FAFC",
                     **window_options,
                 )
                 bridge._window = window

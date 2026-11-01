@@ -64,10 +64,12 @@ class Policy:
     window_end: int = 19
     weekdays_only: bool = True
     flood_wait_max: int = 300  # longer waits pause the account until the end of the day
+    batch_limit: int = 100     # how many leads of a batch go into one campaign (redesign 02)
 
     LIMITS = {"first_day_limit": (1, 50), "daily_increment": (0, 10), "daily_cap": (1, 50),
               "hourly_cap": (1, 30), "delay_min": (45, 3600), "delay_max": (45, 7200),
-              "window_start": (0, 23), "window_end": (1, 24), "flood_wait_max": (30, 3600)}
+              "window_start": (0, 23), "window_end": (1, 24), "flood_wait_max": (30, 3600),
+              "batch_limit": (1, 500)}
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "Policy":

@@ -1,0 +1,17 @@
+﻿{
+ "window": true,
+ "responding": true,
+ "businesses": 42,
+ "first_run_wizard_shown": false,
+ "opens_leads": true,
+ "opens_today": true,
+ "opens_results": true,
+ "opens_search": true,
+ "opens_scripts": true,
+ "opens_ai": true,
+ "opens_media": true,
+ "opens_settings": true,
+ "opens_mailing": true,
+ "toast": "",
+ "closed": true
+}

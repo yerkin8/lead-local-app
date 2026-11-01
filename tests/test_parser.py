@@ -33,7 +33,7 @@ class ParserExtractionTests(unittest.TestCase):
             return url, ("<div class='search-business-snippet-view__content'>"
                          f"<a href='/maps/org/business/{identity}/'>Card</a></div>")
 
-        def fake_org(url, _page, _review_limit=100):
+        def fake_org(url, _page, _review_limit=100, **_kwargs):
             return {"id": url.rstrip("/").split("/")[-1], "site_type": "no_site", "address": "Тверь"}
 
         job = {"id": "test-job", "params": {"country": "Россия", "city": "Тверь",
@@ -95,9 +95,25 @@ class ParserExtractionTests(unittest.TestCase):
           </div>
           <a href='/maps/1/search/coffee/?page=2'>2</a>
         """, "html.parser")
+        businesses, pages = http_search_links("https://yandex.ru/maps/?text=coffee", soup)
+        self.assertEqual(businesses, ["https://yandex.ru/maps/org/coffee/123/"])
+        self.assertEqual(pages, ["https://yandex.ru/maps/1/search/coffee/?page=2"])
+        self.assertIn("lang=ru_RU", localized_url(pages[0]))
+
+    def test_http_search_links_after_redirect_to_com(self):
+        from bs4 import BeautifulSoup
+        from app.lead_parser import http_search_links, localized_url
+
+        soup = BeautifulSoup("""
+          <div class='search-business-snippet-view__content'>
+            <a href='/maps/org/coffee/123/reviews/'>Отзывы</a>
+            <a href='/maps/org/coffee/123/gallery/'>Фото</a>
+          </div>
+          <a href='/maps/1/search/coffee/?page=2'>2</a>
+        """, "html.parser")
         businesses, pages = http_search_links("https://yandex.com/maps/?text=coffee", soup)
-        self.assertEqual(businesses, ["https://yandex.com/maps/org/coffee/123/"])
-        self.assertEqual(pages, ["https://yandex.com/maps/1/search/coffee/?page=2"])
+        self.assertEqual(businesses, ["https://yandex.ru/maps/org/coffee/123/"])
+        self.assertEqual(pages, ["https://yandex.ru/maps/1/search/coffee/?page=2"])
         self.assertIn("lang=ru_RU", localized_url(pages[0]))
 
     def test_tracking_parameters_do_not_duplicate_social_profile(self):

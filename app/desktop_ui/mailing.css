@@ -15,3 +15,6 @@
 .ml-table th { color: var(--text-secondary); font-weight: 600; }
 .ml-metrics { margin: 14px 0; }
 .content h3 { margin: 16px 0 8px; font-size: 14px; }
+.ml-edit { margin-top: 8px; display: grid; gap: 8px; }
+.ml-edit textarea { width: 100%; box-sizing: border-box; font: inherit; color: var(--text-primary); background: var(--bg-hover);
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px; resize: vertical; }

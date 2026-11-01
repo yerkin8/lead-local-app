@@ -23,11 +23,14 @@ def create_service(data_dir: Path):
         ids.update(row["business_id"] for row in db.list_contact_permissions("blocked") if row.get("business_id"))
         return ids
 
+    from ..outreach import record_mailing
+
     return MailingService(
         data_dir, TelethonGateway(),
         businesses=lambda query, limit: db.list_businesses(query, limit=limit),
         business=db.business, templates=db.templates, render=render_template,
-        first_by_site_type=FIRST_BY_SITE_TYPE, external_blocked=blocked)
+        first_by_site_type=FIRST_BY_SITE_TYPE, external_blocked=blocked,
+        reminder_slug="site.reminder", lead_events=record_mailing)
 
 
 class MailingBridgeMixin:
@@ -46,6 +49,9 @@ class MailingBridgeMixin:
 
     def mailing_save_keys(self, api_id, api_hash):
         return self._m("save_keys", api_id, api_hash)
+
+    def mailing_clear_keys(self):
+        return self._m("clear_keys")
 
     def mailing_import_file(self):
         def run():
@@ -91,6 +97,17 @@ class MailingBridgeMixin:
                        data.get("template", ""), list(data.get("accounts") or []), data.get("kind", "normal"),
                        data.get("limit") or None)
 
+    def mailing_message_set(self, campaign_id, recipient_id, text):
+        return self._m("set_message", int(campaign_id), int(recipient_id), str(text or ""))
+
+    def mailing_message_reset(self, campaign_id, recipient_id):
+        return self._m("reset_message", int(campaign_id), int(recipient_id))
+
+    def mailing_launch(self, payload):
+        data = dict(payload or {})
+        return self._m("launch", data.get("title", ""), list(data.get("ids") or []), data.get("template", ""),
+                       list(data.get("accounts") or []), data.get("confirm", ""))
+
     def mailing_list(self):
         return self._m("campaigns")
 
@@ -126,3 +143,19 @@ class MailingBridgeMixin:
 
     def mailing_policy_save(self, values):
         return self._m("save_policy", dict(values or {}))
+
+    # batches and repeats (next/03)
+    def mailing_exclude(self, campaign_id, business_id):
+        return self._m("exclude", int(campaign_id), str(business_id))
+
+    def mailing_include(self, campaign_id, business_id):
+        return self._m("include", int(campaign_id), str(business_id))
+
+    def mailing_repeat_preview(self, campaign_id):
+        return self._m("repeat_preview", int(campaign_id))
+
+    def mailing_repeat(self, payload):
+        data = dict(payload or {})
+        return self._m("repeat", int(data.get("campaign_id") or 0), str(data.get("template") or "auto:reminder"),
+                       str(data.get("title") or ""), [int(x) for x in data.get("accounts") or []],
+                       bool(data.get("live")), str(data.get("confirm") or ""))

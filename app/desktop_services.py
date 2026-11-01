@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import shutil
 import threading
 import time
 import uuid
+from contextlib import closing
 import unicodedata
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import db
 from .driver_registry import quit_driver
@@ -24,16 +27,8 @@ class LocalWorker:
         self.thread: threading.Thread | None = None
 
     def start(self):
-        with db.connection() as conn:
-            # An interrupted send must not be repeated automatically.
-            conn.execute("UPDATE jobs SET status='queued' WHERE status='running' AND kind IN ('search','images','products')")
-            conn.execute("UPDATE parse_runs SET status='queued',ended_at=NULL WHERE status='running'")
-            conn.execute("""UPDATE campaigns SET status='interrupted',
-                error='Приложение закрылось во время рассылки; проверьте результат вручную',updated_at=?
-                WHERE status IN ('queued','running')""", (db.now(),))
-            conn.execute("""UPDATE campaign_recipients SET status='uncertain',
-                error='Приложение закрылось во время отправки; проверьте чат вручную'
-                WHERE status='sending'""")
+        from .jobs import recover_interrupted
+        recover_interrupted()
         self.thread = threading.Thread(target=self.loop, daemon=True, name="LEM jobs")
         self.thread.start()
 
@@ -46,32 +41,17 @@ class LocalWorker:
         return not (self.thread and self.thread.is_alive())
 
     def loop(self):
-        from .lead_parser import run_search
-        from .desktop_gallery import run_gallery_images
-        from .media import delete_media_files, run_products
+        from .jobs import run_job
 
-        runners = {"search": run_search, "images": run_gallery_images, "products": run_products}
         while not self.stop.is_set():
             item = db.claim_job()
             if not item:
                 self.stop.wait(1)
                 continue
-            try:
-                if item["kind"] == "search":
-                    item["params"]["_desktop_details"] = True
-                    parse_run_id = item["params"].get("_desktop_parse_run_id")
-                    if parse_run_id:
-                        db.start_parse_run(parse_run_id)
-                result = runners[item["kind"]](item)
-                db.update_job(item["id"], status="done", result=result)
-                if item["kind"] == "search" and item["params"].get("_desktop_parse_run_id"):
-                    db.finish_parse_run(item["params"]["_desktop_parse_run_id"], "done")
-            except Exception as exc:
-                if item["kind"] == "products":
-                    delete_media_files(item["id"])
-                db.update_job(item["id"], status="failed", error=str(exc)[:1000])
-                if item["kind"] == "search" and item["params"].get("_desktop_parse_run_id"):
-                    db.finish_parse_run(item["params"]["_desktop_parse_run_id"], "failed")
+            run_job(item)
+
+
+MAX_MIN_REVIEWS = 10_000_000
 
 
 def validate_search(payload: dict) -> dict:
@@ -94,6 +74,10 @@ def validate_search(payload: dict) -> dict:
     count = int(payload.get("count", 0))
     types = list(dict.fromkeys(payload.get("types") or []))
     review_limit = int(payload.get("review_limit", 20))
+    try:
+        min_reviews = int(str(payload.get("min_reviews") or 0).strip() or 0)
+    except ValueError:
+        raise ValueError("Минимум отзывов: укажите целое число") from None
     if (country not in COUNTRIES or not cities or len(cities) > 20
             or any(not 2 <= len(item) <= 100 for item in cities) or not 2 <= len(niche) <= 100):
         raise ValueError("Проверьте страну, список городов и нишу (от 1 до 20 городов)")
@@ -101,8 +85,10 @@ def validate_search(payload: dict) -> dict:
         raise ValueError("Укажите цель от 1 до 100 и типы сайтов")
     if not 0 <= review_limit <= 100:
         raise ValueError("Лимит отзывов должен быть от 0 до 100")
+    if not 0 <= min_reviews <= MAX_MIN_REVIEWS:
+        raise ValueError(f"Минимум отзывов: от 0 до {MAX_MIN_REVIEWS:,}".replace(",", " "))
     return {"country": country, "city": city, "cities": cities, "niche": niche, "count": count,
-            "types": types, "review_limit": review_limit}
+            "types": types, "review_limit": review_limit, "min_reviews": min_reviews}
 
 
 def start_desktop_search(payload: dict) -> dict:
@@ -111,6 +97,24 @@ def start_desktop_search(payload: dict) -> dict:
     params.pop("city", None)
     jobs = db.create_desktop_parse_jobs(params, cities)
     return {"jobs": jobs, "count": len(jobs)}
+
+
+def stop_job(job_id: str) -> dict:
+    """A queued job stops at once; a running one is asked to stop and ends as «Остановлен»
+    at the next check (between cards, inside pauses and the review pass)."""
+    from . import cancel
+    item = db.job(job_id)
+    if not item or item["kind"] != "search":
+        raise ValueError("Задание не найдено")
+    if db.stop_queued_job(job_id):
+        cancel.forget(job_id)
+        return {"id": job_id, "status": "stopped"}
+    item = db.job(job_id)
+    if item["status"] == "running":
+        cancel.request(job_id)
+        db.update_job(job_id, progress={**(item.get("progress") or {}), "stopping": True})
+        return {"id": job_id, "status": "stopping"}
+    raise ValueError("Задание уже завершено")
 
 
 def search_results(job_id: str) -> list[dict]:
@@ -260,8 +264,8 @@ def import_xlsx(source: str) -> dict:
         socials = []
         for key in ("socials", "telegram", "whatsapp"):
             for value in values_list(row.get(key)):
-                url = value.get("url") if isinstance(value, dict) else str(value)
-                parsed = urlparse(str(url or ""))
+                url = _plain_url(value.get("url") if isinstance(value, dict) else str(value))
+                parsed = urlparse(url)
                 if parsed.scheme == "https" and parsed.hostname:
                     socials.append({"label": parsed.hostname, "url": str(url)})
         socials = list({item["url"]: item for item in socials}.values())
@@ -286,13 +290,165 @@ def import_xlsx(source: str) -> dict:
     return {"imported": imported, "duplicates": duplicates, "invalid": invalid}
 
 
+MARKDOWN_LINK = re.compile(r"^\[([^\]]*)\]\(([^)\s]+)\)$")
+
+
+def _plain_url(value) -> str:
+    """Old parser XLSX files hold Telegram as a markdown link «[https://t.me/+7…](https://t.me/+7…)»."""
+    text = str(value or "").strip()
+    match = MARKDOWN_LINK.match(text)
+    if match:
+        text = match.group(2) if urlparse(match.group(2)).scheme else match.group(1)
+    return text.strip()
+
+
 def backup_database() -> str:
     folder = DATA_DIR / "backups"
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / (time.strftime("lem-%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8] + ".sqlite3")
-    with sqlite3.connect(DB_PATH) as source, sqlite3.connect(target) as dest:
+    # closing(): `with sqlite3.connect()` only commits; an open handle keeps the file locked on Windows.
+    with closing(sqlite3.connect(DB_PATH)) as source, closing(sqlite3.connect(target)) as dest:
         source.backup(dest)
     return str(target)
+
+
+# Per-organisation data that used to be lost on import (card details, reviews, links, base runs,
+# hidden leads, «Сегодня»). Rows go only to organisations this import added: an organisation already
+# in the local base keeps its own data. AUTOINCREMENT ids are dropped so they never clash.
+BUSINESS_TABLES = ("business_details", "reviews", "links", "hours", "features", "hidden_businesses",
+                   "outreach", "outreach_dead_contacts", "outreach_pins")
+AUTO_ID_TABLES = {"reviews", "outreach"}
+
+
+def _insert_rows(target, table: str, rows) -> None:
+    target_columns = {column[1] for column in target.execute(f"PRAGMA table_info({table})")}
+    if not target_columns:
+        return
+    for record in rows:
+        columns = [column for column in record if column in target_columns]
+        target.execute(f"INSERT OR IGNORE INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                       [record[column] for column in columns])
+
+
+def _copy_business_tables(source_db, target, tables: set[str], new_ids: set[str]) -> None:
+    for table in BUSINESS_TABLES:
+        if table not in tables or not new_ids:
+            continue
+        rows = []
+        for row in source_db.execute(f"SELECT * FROM {table}"):
+            record = dict(row)
+            if record.get("business_id") not in new_ids:
+                continue
+            if table in AUTO_ID_TABLES:
+                record.pop("id", None)
+            rows.append(record)
+        _insert_rows(target, table, rows)
+    # Base hierarchy: runs whose job came over, then links of runs to organisations that exist here.
+    if "parse_runs" in tables:
+        jobs = {row[0] for row in target.execute("SELECT id FROM jobs")}
+        _insert_rows(target, "parse_runs", [dict(row) for row in source_db.execute("SELECT * FROM parse_runs")
+                                            if row["job_id"] in jobs])
+    if "parse_run_businesses" in tables:
+        runs = {row[0] for row in target.execute("SELECT id FROM parse_runs")}
+        known = {row[0] for row in target.execute("SELECT id FROM businesses")}
+        _insert_rows(target, "parse_run_businesses", [
+            dict(row) for row in source_db.execute("SELECT * FROM parse_run_businesses")
+            if row["parse_run_id"] in runs and row["business_id"] in known])
+
+
+def _check_source_schema(path: Path) -> None:
+    exists, version = db._schema_state(path)
+    if exists and version > db.DESKTOP_SCHEMA_VERSION:
+        raise ValueError(f"Эта база создана более новой версией приложения (схема {version}). "
+                         "Обновите LeadEqualMoney и повторите.")
+
+
+def replace_database(source: str) -> dict:
+    """Make another app base the working one: backup → copy → migrate. Nothing is merged."""
+    path = Path(source).expanduser().resolve()
+    if not path.is_file() or path.suffix.lower() not in {".sqlite3", ".db", ".sqlite"}:
+        raise ValueError("Выберите файл базы SQLite")
+    if path == DB_PATH.resolve():
+        raise ValueError("Это текущая база приложения")
+    _check_source_schema(path)
+    check = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        tables = {row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"businesses", "templates"} <= tables:
+            raise ValueError("Файл не похож на базу приложения")
+        if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise ValueError("Файл базы повреждён")
+    finally:
+        check.close()
+    with db.connection() as current:
+        running = current.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+    if running:
+        raise ValueError("Сначала дождитесь окончания или остановите задания поиска и медиа")
+    backup = backup_database()
+    staging = DB_PATH.with_name(DB_PATH.stem + f".replace-{uuid.uuid4().hex[:8]}.sqlite3")
+    try:
+        with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as source_db,                 closing(sqlite3.connect(staging)) as dest:
+            source_db.backup(dest)
+        with closing(sqlite3.connect(DB_PATH)) as current_db:  # fold the WAL into the old file (already backed up)
+            current_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        for suffix in ("-wal", "-shm"):
+            Path(str(DB_PATH) + suffix).unlink(missing_ok=True)
+        os.replace(staging, DB_PATH)
+    finally:
+        staging.unlink(missing_ok=True)
+    db.init_desktop_db()
+    with db.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
+    return {"backup": backup, "businesses": count}
+
+
+def _merge_templates(source_db, target) -> None:
+    """Bring over the user's own scripts from an old database; local edits win.
+
+    AI scripts and user copies are added as they are. A shipped script counts only when it was
+    edited there: its text lands on the new slug (old flat slugs are mapped) unless the local
+    one is edited too. Shipped defaults from any version are skipped.
+    """
+    from .script_legacy import LEGACY_TEMPLATES, V5_TEMPLATES
+    from .script_templates import LEGACY_SLUGS, TEMPLATES, body_hash, is_primary_legacy, parse_slug, resolve_slug
+
+    def keep_copy(row, category, stage, subtype, origin="custom", slug=None):
+        """Add the text under a free slug unless the very same text is already there."""
+        base = slug or f"custom_{row['slug']}"
+        same = target.execute("SELECT 1 FROM templates WHERE (slug=? OR slug GLOB ?) AND body=?",
+                              (base, base + "_[0-9]*", row["body"])).fetchone()
+        if same:
+            return
+        title = row["title"] if origin != "custom" else f"Ваша правка · {row['title']}"[:60]
+        target.execute("""INSERT INTO templates(slug,title,body,updated_at,origin,category,stage,subtype)
+            VALUES (?,?,?,?,?,?,?,?)""", (db._free_slug(target, base), title, row["body"], row["updated_at"],
+                                          origin, category, stage, subtype))
+
+    source_columns = {column[1] for column in source_db.execute("PRAGMA table_info(templates)")}
+    extra = [column for column in ("origin", "category", "stage", "subtype", "default_hash") if column in source_columns]
+    for record in source_db.execute(f"SELECT slug,title,body,updated_at{''.join(',' + c for c in extra)} FROM templates"):
+        row = dict(record)
+        origin = row.get("origin") or "builtin"
+        if origin != "builtin":
+            keep_copy(row, row.get("category") or "", row.get("stage") or "", row.get("subtype") or "",
+                      origin=origin, slug=row["slug"])
+            continue
+        shipped = {texts[row["slug"]][1] for texts in (V5_TEMPLATES, LEGACY_TEMPLATES) if row["slug"] in texts}
+        slug = resolve_slug(row["slug"])
+        if slug in TEMPLATES:
+            shipped.add(TEMPLATES[slug][1])
+        # A shipped text of any version (v6+ rows carry the hash of what they shipped with).
+        if row["body"] in shipped or (row.get("default_hash") and body_hash(row["body"]) == row["default_hash"]):
+            continue
+        category, stage, subtype = parse_slug(slug) or ("general", "", "")
+        local = target.execute("SELECT body,default_hash FROM templates WHERE slug=?", (slug,)).fetchone()
+        owns_place = row["slug"] not in LEGACY_SLUGS or is_primary_legacy(row["slug"])
+        if owns_place and local and body_hash(local["body"]) == local["default_hash"]:
+            target.execute("UPDATE templates SET body=?,updated_at=? WHERE slug=?", (row["body"], row["updated_at"], slug))
+        elif not local or local["body"] != row["body"]:
+            # The local script is edited too, the old slug does not own this place, or the slug is
+            # unknown here: keep the imported text as the user's own copy so nothing is lost.
+            keep_copy(row, category, stage, subtype)
 
 
 def import_sqlite(source: str) -> dict:
@@ -302,6 +458,7 @@ def import_sqlite(source: str) -> dict:
         raise ValueError("Выберите старую SQLite-базу")
     if path == DB_PATH.resolve():
         raise ValueError("Это текущая база приложения")
+    _check_source_schema(path)
     backup_database()
     source_db = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
     source_db.row_factory = sqlite3.Row
@@ -345,12 +502,8 @@ def import_sqlite(source: str) -> dict:
                     columns = [column for column in record if column in target_columns]
                     target.execute(f"INSERT OR IGNORE INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
                                    [record[column] for column in columns])
-            for row in source_db.execute("SELECT slug,title,body,updated_at FROM templates"):
-                default = target.execute("SELECT body FROM templates WHERE slug=?", (row["slug"],)).fetchone()
-                from .script_templates import TEMPLATES
-                if not default or default["body"] == TEMPLATES.get(row["slug"], (None, None))[1]:
-                    target.execute("INSERT INTO templates VALUES (?,?,?,?) ON CONFLICT(slug) DO UPDATE SET title=excluded.title,body=excluded.body,updated_at=excluded.updated_at",
-                                   tuple(row))
+            _copy_business_tables(source_db, target, tables, new_ids)
+            _merge_templates(source_db, target)
         db.init_desktop_db()
         old_media = path.parent / "media"
         if old_media.is_dir():

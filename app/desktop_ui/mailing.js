@@ -5,6 +5,7 @@ const ML = {
   campaign: {draft: 'Черновик', running: 'Идёт отправка', paused: 'Пауза', stopped: 'Остановлена', done: 'Завершена'},
   recipient: {queued: 'В очереди', sending: 'Отправляется', sent: 'Отправлено', dry_sent: 'Сухой запуск', skipped: 'Пропущено', unreachable: 'Недоступен', failed: 'Ошибка'},
   site: {'': 'Любой', no_site: 'Без сайта', weak_site: 'Сайт на конструкторе', unavailable: 'Сайт недоступен', other: 'Обычный сайт'},
+  stage: {first: 'первое сообщение', reminder: 'напоминание', repeat: 'повтор'},
   tabs: [['campaigns', 'Кампании'], ['accounts', 'Аккаунты'], ['stoplist', 'Стоп-лист'], ['policy', 'Правила отправки'], ['journal', 'Журнал']],
 };
 state.mailingTab ||= 'campaigns';
@@ -13,14 +14,14 @@ state.mailingDraft ||= {title: '', template: '', kind: 'normal', limit: 3, accou
 state.mailingLogin ||= {};
 
 const mailingSnapshot = snapshotNavigation;
-snapshotNavigation = function () { return {...mailingSnapshot(), mailingTab: state.mailingTab, mailingCampaign: state.mailingCampaign}; };
+snapshotNavigation = function () { return {...mailingSnapshot(), mailingTab: state.mailingTab, mailingCampaign: state.mailingCampaign, mailingFromLeads: state.mailingFromLeads}; };
 const mailingSamePlace = samePlace;
 samePlace = function (a, b) { return mailingSamePlace(a, b) && a.mailingTab === b.mailingTab && a.mailingCampaign === b.mailingCampaign; };
 const mailingRender = render;
 render = async function () {
   if (state.view !== 'mailing') return mailingRender();
   const node = document.querySelector('#content');
-  try { await mailingPage(node); } catch (error) { node.innerHTML = empty('Не удалось открыть раздел «Рассылка»', error.message); }
+  try { await mailingPage(node); } catch (error) { setHeader('Рассылка', 'Раздел не открылся'); node.innerHTML = empty('Не удалось открыть раздел «Рассылка»', error.message); }
   syncBackButton();
 };
 function mlGo(extra) { pushNavigation(); Object.assign(state, extra); render(); }
@@ -38,6 +39,7 @@ async function mailingPage(node) {
   if (!o.keys_configured) return mailingSetup(node, o);
   setHeader('Рассылка', 'Сообщения в Telegram с ваших аккаунтов по собранной базе');
   if (state.mailingCampaign) return mailingCampaignPage(node, o);
+  if (state.mailingFromLeads) return mailingCompose(node, o);
   if (state.mailingTab === 'new') return mailingNew(node, o);
   const tabs = `<div class="tabs ml-tabs">${ML.tabs.map(([key, label]) => `<button type="button" class="tab ${state.mailingTab === key ? 'active' : ''}" data-ml-tab="${key}">${label}</button>`).join('')}</div>`;
   node.innerHTML = `${mlEmergency(o)}${tabs}<div id="ml-body">${empty('Загрузка…')}</div>`;
@@ -99,8 +101,9 @@ function mailingCounts(c) {
 
 async function mailingCampaigns(body) {
   const rows = await call('mailing_list');
-  body.innerHTML = `<section class="panel"><div class="panel-head"><div><h2>Кампании</h2><p>Новая кампания всегда начинается с сухого запуска — без отправки.</p></div><button type="button" class="btn primary" data-ml-tab="new">Новая кампания</button></div>
-    <div class="list">${rows.length ? rows.map(c => `<div class="row"><div class="row-head"><div><span class="row-title">${E(c.title)}</span><div class="small muted">${E(mlTime(c.created_at))} · ${c.kind === 'test' ? 'тестовая' : 'обычная'} · ${c.mode === 'live' ? 'реальная отправка' : 'сухой запуск'}</div></div><div class="row-actions">${mlChip(ML.campaign[c.status] || c.status, c.status === 'running' ? 'green' : c.status === 'stopped' ? 'warn' : '')}<button type="button" class="btn" data-ml-campaign="${c.id}">Открыть</button></div></div><div class="chips">${mailingCounts(c)}</div>${c.stop_reason ? `<div class="inline-note ${c.status === 'stopped' ? 'error-note' : ''}">${E(c.stop_reason)}</div>` : ''}</div>`).join('') : empty('Кампаний пока нет', 'Создайте первую кампанию и проверьте её сухим запуском')}</div></section>`;
+  body.innerHTML = `<section class="panel"><div class="panel-head"><div><h2>Кампании</h2><p>Новая кампания всегда начинается с сухого запуска — без отправки.</p></div><div class="toolbar"><button type="button" class="btn" data-ml="to-leads">Пачка из «Лидов»</button><button type="button" class="btn primary" data-ml-tab="new">Новая кампания</button></div></div>
+    <div class="inline-note">Быстрее всего: в «Лидах» задайте вкладку и фильтры и нажмите «Разослать этой пачке» — каждому лиду текст подставится сам, запуск одной кнопкой. Тайминг и количество — в «Настройках».</div>
+    <div class="list">${rows.length ? rows.map(c => `<div class="row"><div class="row-head"><div><span class="row-title">${E(c.title)}</span><div class="small muted">${E(mlTime(c.created_at))} · ${c.kind === 'test' ? 'тестовая' : 'обычная'} · ${c.mode === 'live' ? 'реальная отправка' : 'сухой запуск'} · пачка №${E(c.batch_id)} · ${E(ML.stage[c.stage] || 'первое сообщение')}</div></div><div class="row-actions">${mlChip(ML.campaign[c.status] || c.status, c.status === 'running' ? 'green' : c.status === 'stopped' ? 'warn' : '')}<button type="button" class="btn" data-ml-campaign="${c.id}">Открыть</button></div></div><div class="chips">${mailingCounts(c)}</div>${c.stop_reason ? `<div class="inline-note ${c.status === 'stopped' ? 'error-note' : ''}">${E(c.stop_reason)}</div>` : ''}</div>`).join('') : empty('Кампаний пока нет', 'Откройте «Лиды» и нажмите «Разослать этой пачке»')}</div></section>`;
 }
 
 async function mailingNew(node, o) {
@@ -140,6 +143,89 @@ function mailingCollect(form) {
   return {title: d.title, template: d.template, kind: d.kind, limit: d.limit || null, accounts: d.accounts.map(Number), filters};
 }
 
+// ------------------------------------------------ campaign from «Лиды» (redesign 02)
+window.mailingFromLeads = function (filters) {
+  const prev = state.mailingFromLeads || {};
+  setView('mailing', {mailingCampaign: null, mailingTab: 'campaigns',
+    mailingFromLeads: {filters: {...(filters || {})}, ids: null, title: prev.title || '', script: 'auto', accounts: prev.accounts || []}});
+};
+
+const ML_SEGMENTS = {new: 'Новые', remind: 'Напомнить', written: 'Написал', talking: 'В диалоге', all: 'Все'};
+async function mailingBatchIds(filters, limit) {
+  const ids = [];
+  for (let offset = 0; ids.length < limit; ) {
+    const page = await call('leads_list', {...filters, offset});
+    page.items.forEach(x => ids.length < limit && ids.push(x.id));
+    if (!page.more || !page.items.length) break;
+    offset += page.items.length;
+  }
+  return ids;
+}
+
+async function mailingCompose(node, o) {
+  const f = state.mailingFromLeads;
+  const limit = o.policy.batch_limit || 100;
+  if (!f.ids) f.ids = await mailingBatchIds(f.filters, limit);
+  const scripts = await call('mailing_scripts', '');
+  const usable = o.accounts.filter(a => a.status !== 'needs_login' && a.status !== 'quarantine' && !a.is_test);
+  if (!f.accounts.length) f.accounts = usable.map(a => String(a.id));
+  const fl = f.filters || {};
+  const what = [ML_SEGMENTS[fl.segment] || 'Новые', fl.niche, fl.city, fl.site_type ? ML.site[fl.site_type] : '', fl.q ? `«${fl.q}»` : ''].filter(Boolean).join(' · ');
+  setHeader('Рассылка по пачке лидов', `${what} · ${f.ids.length} ${f.ids.length === limit ? `(лимит пачки ${limit} из «Настроек»)` : 'лидов'}`);
+  node.innerHTML = `${mlEmergency(o)}<form id="ml-compose-form" class="detail-stack"><section class="panel"><span class="section-kicker">ПАЧКА ИЗ «ЛИДОВ»</span><h2>${E(f.ids.length)} получателей · ${E(what)}</h2>
+      <div class="form-grid"><label class="field">Название кампании<input name="title" maxlength="120" value="${E(f.title)}" placeholder="${E(what)}"></label>
+      <label class="field">Скрипт<select name="script"><option value="auto" ${f.script === 'auto' ? 'selected' : ''}>Авто: под тип сайта лида</option>${scripts.items.map(s => `<option value="${E(s.slug)}" ${s.slug === f.script ? 'selected' : ''}>${E(s.title)}</option>`).join('')}</select></label></div>
+      <p class="small muted">Каждому лиду текст подставится сам: название, город, ниша, тип сайта. Строка про «СТОП» добавляется автоматически. Стоп-лист, «Не писать», дубли и лиды без username Telegram пропускаются.</p>
+      <h3>С каких аккаунтов</h3><div class="checkboxes">${usable.length ? usable.map(a => `<label><input type="checkbox" name="accounts" value="${a.id}" ${f.accounts.includes(String(a.id)) ? 'checked' : ''}> ${E(a.label)} · сегодня ${E(a.sent_today)} из ${E(a.limit_today)}</label>`).join('') : '<span class="muted">Нет готовых аккаунтов — добавьте и войдите во вкладке «Аккаунты».</span>'}</div>
+      <div class="ml-live"><div>Сообщения получат настоящие организации. Паузы, лимиты в день и в час и окно отправки — из «Настроек». Для запуска введите слово <code>${E(o.confirm_word)}</code>.</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения"></div>
+      <div class="toolbar"><button class="btn primary" ${f.ids.length && usable.length ? '' : 'disabled'}>Запустить рассылку</button><button type="button" class="btn" data-ml="compose-review" ${f.ids.length && usable.length ? '' : 'disabled'}>Сначала посмотреть тексты</button><button type="button" class="ghost" data-ml="compose-cancel">Отмена</button></div></section></form>`;
+}
+
+function mailingComposeCollect(form) {
+  const x = new FormData(form), f = state.mailingFromLeads;
+  f.title = x.get('title') || ''; f.script = x.get('script') || 'auto'; f.accounts = x.getAll('accounts');
+  const fl = f.filters || {};
+  const title = f.title || ['Пачка', fl.niche, fl.city].filter(Boolean).join(' · ');
+  return {title, ids: f.ids, template: f.script === 'auto' ? 'auto' : '', script: f.script, accounts: f.accounts.map(Number), confirm: x.get('confirm') || ''};
+}
+
+async function mailingComposeTemplate(payload) {
+  if (payload.template) return payload.template;
+  const scripts = await call('mailing_scripts', '');
+  return (scripts.items.find(s => s.slug === payload.script) || {}).body || 'auto';
+}
+
+// What happened to one business of the batch, in the owner's words.
+function mlResult(r) {
+  if (r.replied_at) return ['Ответил', 'green'];
+  if (r.reason_kind === 'excluded') return ['Убран из пачки', ''];
+  if (r.status === 'sent') return ['Отправлено', 'green'];
+  if (r.status === 'dry_sent') return ['Сухой запуск: ушло бы', 'purple'];
+  if (r.status === 'queued' || r.status === 'sending') return ['В очереди', ''];
+  if (r.status === 'unreachable' || r.status === 'failed') return ['Не дошло', 'warn'];
+  if (r.status === 'skipped' && r.reason_kind === 'stoplist') return ['В стоп-листе', 'warn'];
+  return ['Пропущено', ''];
+}
+function mlResultCounts(rows) {
+  const counts = {};
+  rows.forEach(r => { const [label] = mlResult(r); counts[label] = (counts[label] || 0) + 1; });
+  return Object.entries(counts).map(([label, n]) => mlChip(`${label}: ${n}`)).join('');
+}
+
+function mailingRecipient(c, r) {
+  const editable = c.status !== 'running' && ['queued', 'dry_sent'].includes(r.status);
+  const who = r.username ? (String(r.username).startsWith('+') || String(r.username).includes('•') ? E(r.username) : '@' + E(r.username)) : 'нет username';
+  const text = editable
+    ? `<div class="ml-edit" data-ml-rid="${r.id}"><textarea rows="5" aria-label="Текст для ${E(r.business_name)}">${E(r.message)}</textarea><div class="toolbar"><button type="button" class="btn" data-ml-msg-save="${r.id}">Сохранить текст</button>${r.edited ? `<button type="button" class="ghost" data-ml-msg-reset="${r.id}">Вернуть шаблон</button>` : ''}</div></div>`
+    : `<details><summary>Текст</summary><pre class="ml-text">${E(r.message)}</pre></details>`;
+  const [result, tone] = mlResult(r);
+  const lead = (state.config?.statuses || {})[r.lead_status];
+  const batchAction = c.kind === 'normal' || c.kind === 'test'
+    ? (r.excluded ? `<button type="button" class="ghost" data-ml-include="${E(r.business_id)}">Вернуть в пачку</button>`
+      : `<button type="button" class="ghost" data-ml-exclude="${E(r.business_id)}" title="Не писать ему в повторах этой пачки">Убрать из пачки</button>`) : '';
+  return `<div class="row small ml-recipient"><div class="row-head"><div><span class="row-title">${E(r.business_name)}</span><div class="muted">${who}${r.msg_id ? ` · сообщение № ${E(r.msg_id)}` : ''}${r.sent_at ? ` · ${E(mlTime(r.sent_at))}` : ''}</div></div><div class="row-actions"><div class="chips">${r.edited ? mlChip('Текст изменён', 'purple') : ''}${lead ? mlChip(`В «Лидах»: ${lead}`) : ''}${mlChip(result, tone)}</div>${batchAction}<button type="button" class="ghost" data-open="${E(r.business_id)}">Карточка</button></div></div>${r.reason && !['Отправлено'].includes(result) ? `<div class="muted">${E(r.reason)}</div>` : ''}${text}</div>`;
+}
+
 async function mailingCampaignPage(node, o) {
   const c = await call('mailing_detail', state.mailingCampaign);
   setHeader(c.title, `${c.kind === 'test' ? 'Тестовая' : 'Обычная'} кампания · ${c.mode === 'live' ? 'реальная отправка' : 'сухой запуск'}`);
@@ -154,7 +240,49 @@ async function mailingCampaignPage(node, o) {
   const goLive = !live ? `<form id="ml-live-form" class="ml-live"><div><strong>Реальная отправка выключена.</strong> Чтобы включить её осознанно, введите слово <code>${E(o.confirm_word)}</code>.${c.kind === 'normal' ? ' Сообщения получат настоящие организации.' : ' Сообщения получат только ваши тестовые адресаты.'}</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения" value="${E(state.mailingConfirm || '')}"><button class="danger">Включить реальную отправку</button></form>` : '';
   node.innerHTML = `${mlEmergency(o)}<section class="panel"><div class="panel-head"><div><span class="section-kicker">${E(ML.campaign[c.status] || c.status)}</span><h2>${E(c.title)}</h2><p>Создана ${E(mlTime(c.created_at))}${c.started_at ? ` · запуск ${E(mlTime(c.started_at))}` : ''}</p></div><div class="toolbar">${controls}</div></div>
       ${c.stop_reason ? `<div class="inline-note ${c.status === 'stopped' ? 'error-note' : ''}">${E(c.stop_reason)}</div>` : ''}${goLive}<div id="ml-stats">${mailingStats(c)}</div></section>
-    <section class="panel"><h2>Получатели</h2><div class="list">${c.recipients.map(r => `<div class="row small"><div class="row-head"><div><span class="row-title">${E(r.business_name)}</span><div class="muted">${r.username ? (String(r.username).startsWith('+') || String(r.username).includes('•') ? E(r.username) : '@' + E(r.username)) : 'нет username'}${r.msg_id ? ` · сообщение № ${E(r.msg_id)}` : ''}${r.sent_at ? ` · ${E(mlTime(r.sent_at))}` : ''}</div></div>${mlChip(ML.recipient[r.status] || r.status, r.status === 'sent' ? 'green' : ['failed', 'unreachable'].includes(r.status) ? 'warn' : '')}</div>${r.reason ? `<div class="muted">${E(r.reason)}</div>` : ''}<details><summary>Текст</summary><pre class="ml-text">${E(r.message)}</pre></details></div>`).join('')}</div></section>`;
+    ${mailingBatchPanel(c)}
+    <section class="panel" id="ml-repeat">${empty('Готовлю повтор…')}</section>
+    <section class="panel" id="ml-recipients"><div class="panel-head"><div><h2>Бизнесы пачки и результат</h2><p>${c.status === 'running' ? 'Кампания идёт — тексты можно менять на паузе.' : 'По каждому бизнесу видно, что произошло. Пока сообщение не ушло, текст можно поправить — он уйдёт именно таким.'}</p></div></div><div class="chips">${mlResultCounts(c.recipients)}</div><div class="list">${c.recipients.map(r => mailingRecipient(c, r)).join('')}</div></section>`;
+  await mailingRepeatPanel(node.querySelector('#ml-repeat'), c, o);
+  if (state.mailingJustCreated === c.id) { state.mailingJustCreated = null; setHeader(c.title, 'Тексты подставлены. Поправьте любой при желании, затем сухой запуск или реальная отправка'); node.querySelector('#ml-recipients')?.scrollIntoView(); }
+}
+
+function mailingBatchPanel(c) {
+  const items = c.batch || [];
+  return `<section class="panel"><span class="section-kicker">ПАЧКА №${E(c.batch_id)}</span><h2>Что стало с пачкой</h2>
+    <p class="small muted">Пачка — это первая рассылка и все её повторы. Результат хранится здесь: у каждого бизнеса видно «Отправлено», «Не дошло», «В стоп-листе», «Пропущено» или «Ответил». После реальной отправки лид в «Лидах» получает «Написал», через 3 дня он появится в напоминаниях «Сегодня».</p>
+    <div class="list">${items.map(x => `<div class="row small"><div class="row-head"><div><span class="row-title">${x.id === c.id ? '▸ ' : ''}${E(x.title)}</span><div class="muted">${E(mlTime(x.created_at))} · ${E(ML.stage[x.stage] || 'первое сообщение')} · ${x.mode === 'live' ? 'реальная отправка' : 'сухой запуск'}</div></div><div class="row-actions"><div class="chips">${mailingCounts(x)}</div>${x.id === c.id ? '' : `<button type="button" class="btn" data-ml-campaign="${x.id}">Открыть</button>`}</div></div></div>`).join('')}</div></section>`;
+}
+
+async function mailingRepeatPanel(box, c, o) {
+  if (!box) return;
+  if (c.status === 'running' || !(c.counts.sent || c.counts.dry_sent)) {
+    box.innerHTML = `<h2>Повторить пачку</h2><p class="muted">${c.status === 'running' ? 'Повтор можно сделать, когда кампания закончится или встанет на паузу.' : 'Повторять пока некому: никто не получил сообщение этой кампании.'}</p>`;
+    return;
+  }
+  const [plan, scripts] = await Promise.all([call('mailing_repeat_preview', c.id), call('mailing_scripts', '')]);
+  const r = state.mailingRepeat?.campaign === c.id ? state.mailingRepeat : (state.mailingRepeat = {campaign: c.id, template: 'auto:reminder', accounts: plan.accounts.map(String), confirm: ''});
+  const usable = o.accounts.filter(a => a.status !== 'needs_login' && a.status !== 'quarantine' && (c.kind === 'test' ? a.is_test : !a.is_test));
+  const reasons = {};
+  plan.skip.forEach(x => { reasons[x.reason] = (reasons[x.reason] || 0) + 1; });
+  const liveAllowed = c.mode === 'live';
+  box.innerHTML = `<span class="section-kicker">ПОВТОР</span><h2>Повторить пачку другим сообщением</h2>
+    <p>Получат <strong>${E(plan.include.length)}</strong> из ${E(plan.include.length + plan.skip.length)}. Не попадут: ${plan.skip.length ? Object.entries(reasons).map(([k, n]) => `${E(k)} — ${E(n)}`).join(' · ') : 'никто'}.</p>
+    <p class="small muted">По умолчанию не попадают ответившие, убранные из пачки, стоп-лист, «Не писать» и лиды со статусом «Ответили», «В работе», «Договорились», «Отказ». Лимиты, паузы и окно отправки — как у любой кампании.</p>
+    <form id="ml-repeat-form" class="ml-form"><div class="form-grid">
+      <label class="field">Сообщение<select name="template"><option value="auto:reminder" ${r.template === 'auto:reminder' ? 'selected' : ''}>Напоминание — подставится каждому сам</option>${scripts.items.map(s => `<option value="${E(s.body)}" ${s.body === r.template ? 'selected' : ''}>${E(s.title)}</option>`).join('')}</select></label>
+      <label class="field">Название<input name="title" maxlength="120" value="${E(r.title || '')}" placeholder="${E(c.title)} · напоминание"></label></div>
+      <h3>С каких аккаунтов</h3><div class="checkboxes">${usable.length ? usable.map(a => `<label><input type="checkbox" name="accounts" value="${a.id}" ${r.accounts.includes(String(a.id)) ? 'checked' : ''}> ${E(a.label)}${a.is_test ? ' · тестовый' : ''} · сегодня ${E(a.sent_today)} из ${E(a.limit_today)}</label>`).join('') : '<span class="muted">Нет готовых аккаунтов</span>'}</div>
+      ${liveAllowed ? `<div class="ml-live"><div>Для реальной отправки введите слово <code>${E(o.confirm_word)}</code>. ${c.kind === 'normal' ? 'Сообщения получат настоящие организации.' : 'Сообщения получат только ваши тестовые адресаты.'}</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения" value="${E(r.confirm || '')}"></div>` : '<p class="small muted">Эта кампания была сухим запуском — повтор тоже только сухой.</p>'}
+      <div class="toolbar"><button type="button" class="btn" data-ml="repeat-dry" ${plan.include.length ? '' : 'disabled'}>Сначала сухой запуск повтора</button>${liveAllowed ? `<button type="button" class="btn primary" data-ml="repeat-live" ${plan.include.length && usable.length ? '' : 'disabled'}>Запустить повтор</button>` : ''}</div></form>
+    ${plan.skip.length ? `<details><summary>Кто не попадёт в повтор (${E(plan.skip.length)})</summary><div class="list">${plan.skip.map(x => `<div class="row small"><span class="row-title">${E(x.name)}</span> <span class="muted">${E(x.reason)}</span></div>`).join('')}</div></details>` : ''}`;
+}
+
+function mailingRepeatCollect() {
+  const form = document.querySelector('#ml-repeat-form');
+  const x = new FormData(form), r = state.mailingRepeat;
+  r.template = x.get('template') || 'auto:reminder'; r.title = x.get('title') || ''; r.accounts = x.getAll('accounts'); r.confirm = x.get('confirm') || '';
+  return {campaign_id: r.campaign, template: r.template, title: r.title, accounts: r.accounts.map(Number), confirm: r.confirm};
 }
 
 function mailingStats(c) {
@@ -179,7 +307,7 @@ function mailingPolicy(body, o) {
   const p = o.policy;
   const field = (name, label, min, max) => `<label class="field">${label}<input name="${name}" type="number" min="${min}" max="${max}" value="${E(p[name])}"></label>`;
   body.innerHTML = `<section class="panel"><h2>Правила отправки</h2><p>Значения по умолчанию консервативные. Новый аккаунт начинает с малого и наращивает лимит каждый день.</p>
-    <form id="ml-policy-form"><div class="form-grid">${field('first_day_limit', 'Лимит в первый день', 1, 50)}${field('daily_increment', 'Прирост лимита в день', 0, 10)}${field('daily_cap', 'Потолок в день', 1, 50)}${field('hourly_cap', 'Не больше в час', 1, 30)}${field('delay_min', 'Пауза от, с', 45, 3600)}${field('delay_max', 'Пауза до, с', 45, 7200)}${field('window_start', 'Окно с (час получателя)', 0, 23)}${field('window_end', 'Окно до (час)', 1, 24)}${field('flood_wait_max', 'Ждать FloodWait не дольше, с', 30, 3600)}</div>
+    <form id="ml-policy-form"><div class="form-grid">${field('first_day_limit', 'Лимит в первый день', 1, 50)}${field('daily_increment', 'Прирост лимита в день', 0, 10)}${field('daily_cap', 'Потолок в день', 1, 50)}${field('hourly_cap', 'Не больше в час', 1, 30)}${field('delay_min', 'Пауза от, с', 45, 3600)}${field('delay_max', 'Пауза до, с', 45, 7200)}${field('window_start', 'Окно с (час получателя)', 0, 23)}${field('window_end', 'Окно до (час)', 1, 24)}${field('flood_wait_max', 'Ждать FloodWait не дольше, с', 30, 3600)}${field('batch_limit', 'Лидов в одной пачке', 1, 500)}</div>
     <label class="ml-check"><input type="checkbox" name="weekdays_only" ${p.weekdays_only ? 'checked' : ''}> Только будни</label>
     <div class="inline-note">При ограничении аккаунта (PeerFlood, бан, заморозка) он уходит в карантин, его кампания останавливается. Трафик на другие аккаунты не переносится.</div>
     <div class="toolbar"><button class="btn primary">Сохранить правила</button></div></form></section>`;
@@ -189,22 +317,53 @@ function mailingJournal(body, o) {
   body.innerHTML = `<section class="panel"><div class="panel-head"><div><h2>Журнал</h2><p>Последние события модуля. Номера и ключи в журнал не попадают.</p></div><button type="button" class="btn" data-ml-tab="journal">Обновить</button></div><div class="list">${o.events.length ? o.events.map(e => `<div class="row small"><span class="chip ${e.level === 'error' ? 'warn' : ''}">${E(e.kind)}</span> <span class="muted">${E(mlTime(e.at))}</span> ${E(e.message)}</div>`).join('') : empty('Событий нет')}</div></section>`;
 }
 
+// «Настройки» → блок «Рассылка: тайминг и количество». Self-contained: renders into any node and
+// saves by itself (the Settings screen mounts it; safety bounds are enforced by Policy in Python).
+async function mailingSettingsBlock(node) {
+  const o = await call('mailing_overview');
+  const p = o.policy;
+  const field = (name, label, min, max, hint = '') => `<label class="field">${label}<input name="${name}" type="number" min="${min}" max="${max}" value="${E(p[name])}">${hint ? `<span class="small muted">${hint}</span>` : ''}</label>`;
+  node.innerHTML = `<section class="panel ml-settings"><h2>Рассылка: тайминг и количество</h2><p class="small muted">Границы жёсткие: Telegram ограничивает аккаунты, которые пишут слишком часто.</p>
+    <form class="ml-settings-form"><h3>Тайминг</h3><div class="form-grid">${field('delay_min', 'Пауза между сообщениями от, с', 45, 3600)}${field('delay_max', 'Пауза до, с', 45, 7200)}${field('window_start', 'Писать с (час получателя)', 0, 23)}${field('window_end', 'Писать до (час)', 1, 24)}</div>
+    <label class="ml-check"><input type="checkbox" name="weekdays_only" ${p.weekdays_only ? 'checked' : ''}> Только будни</label>
+    <h3>Количество</h3><div class="form-grid">${field('batch_limit', 'Лидов в одной пачке', 1, 500)}${field('daily_cap', 'Сообщений в день с аккаунта, не больше', 1, 50)}${field('hourly_cap', 'В час, не больше', 1, 30)}${field('first_day_limit', 'Новый аккаунт: в первый день', 1, 50)}${field('daily_increment', 'Прирост лимита в день', 0, 10)}</div>
+    <div class="toolbar"><button class="btn primary">Сохранить</button><span class="small muted" data-ml-settings-note></span></div></form></section>`;
+  const form = node.querySelector('.ml-settings-form');
+  form.addEventListener('submit', event => {
+    event.preventDefault(); event.stopPropagation();
+    safe(async () => {
+      const x = new FormData(form);
+      const values = Object.fromEntries([...x.entries()].filter(([k]) => k !== 'weekdays_only').map(([k, v]) => [k, Number(v)]));
+      values.weekdays_only = x.get('weekdays_only') === 'on';
+      await call('mailing_policy_save', values);
+      form.querySelector('[data-ml-settings-note]').textContent = 'Сохранено';
+      toast('Настройки рассылки сохранены');
+    });
+  });
+}
+window.mailingSettingsBlock = mailingSettingsBlock;
+
 // ---------------------------------------------------------------- handlers
 document.addEventListener('input', event => {
   const form = event.target.closest?.('#ml-new-form');
   if (form) mailingCollect(form);
+  const compose = event.target.closest?.('#ml-compose-form');
+  if (compose) mailingComposeCollect(compose);
   if (event.target.closest?.('#ml-live-form')) state.mailingConfirm = event.target.value;
+  if (event.target.closest?.('#ml-repeat-form')) mailingRepeatCollect();
 });
 document.addEventListener('change', event => {
   const form = event.target.closest?.('#ml-new-form');
   if (form) mailingCollect(form);
+  const compose = event.target.closest?.('#ml-compose-form');
+  if (compose) mailingComposeCollect(compose);
 });
 
 document.addEventListener('click', event => {
   const b = event.target.closest('button');
   if (!b || state.view !== 'mailing') return;
   const d = b.dataset;
-  if (!(d.ml || d.mlTab || d.mlCampaign || d.mlLogin || d.mlLoginCancel || d.mlAccountStatus || d.mlLogout || d.mlStopRemove)) return;
+  if (!(d.ml || d.mlTab || d.mlCampaign || d.mlLogin || d.mlLoginCancel || d.mlAccountStatus || d.mlLogout || d.mlStopRemove || d.mlMsgSave || d.mlMsgReset || d.mlExclude || d.mlInclude)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   safe(async () => {
     if (d.mlTab) { const form = document.querySelector('#ml-new-form'); if (form) mailingCollect(form); mlGo({mailingTab: d.mlTab, mailingCampaign: null}); return; }
@@ -213,12 +372,19 @@ document.addEventListener('click', event => {
     if (d.mlLoginCancel) { await call('mailing_login_cancel', d.mlLoginCancel); delete state.mailingLogin[d.mlLoginCancel]; render(); return; }
     if (d.mlAccountStatus) { if (d.confirm && !confirm(d.confirm)) return; await call('mailing_account_status', d.mlAccountStatus, d.status); render(); return; }
     if (d.mlLogout) { if (!confirm('Удалить сессию этого аккаунта с компьютера? Для отправки снова понадобится вход.')) return; await call('mailing_account_logout', d.mlLogout); render(); return; }
+    if (d.mlMsgSave) { const text = document.querySelector(`[data-ml-rid="${d.mlMsgSave}"] textarea`).value; await call('mailing_message_set', state.mailingCampaign, d.mlMsgSave, text); toast('Текст сохранён для этого получателя'); render(); return; }
+    if (d.mlMsgReset) { await call('mailing_message_reset', state.mailingCampaign, d.mlMsgReset); toast('Текст снова по шаблону'); render(); return; }
     if (d.mlStopRemove) { await call('mailing_stop_remove', d.mlStopRemove); render(); return; }
+    if (d.mlExclude) { const r = await call('mailing_exclude', state.mailingCampaign, d.mlExclude); toast(r.withdrawn ? 'Убран из пачки, его сообщение снято с очереди' : 'Убран из пачки — в повторы не попадёт'); render(); return; }
+    if (d.mlInclude) { await call('mailing_include', state.mailingCampaign, d.mlInclude); toast('Возвращён в пачку для следующих повторов'); render(); return; }
     const id = state.mailingCampaign;
     switch (d.ml) {
       case 'emergency': await call('mailing_emergency'); toast('Аварийный стоп: все отправки остановлены', true); render(); break;
       case 'emergency-clear': if (confirm('Снять аварийный стоп? Кампании останутся на паузе, их нужно продолжить вручную.')) { await call('mailing_emergency_clear'); render(); } break;
       case 'import-file': { const r = await call('mailing_import_file'); if (r) toast(`Ключи: ${r.keys ? 'сохранены' : 'нет в файле'} · аккаунтов добавлено ${r.accounts_added} · тестовых адресатов ${r.test_recipients}`); render(); break; }
+      case 'to-leads': setView('leads'); toast('Задайте вкладку и фильтры и нажмите «Разослать этой пачке»'); break;
+      case 'compose-cancel': mlGo({mailingFromLeads: null}); break;
+      case 'compose-review': { const payload = mailingComposeCollect(document.querySelector('#ml-compose-form')); payload.template = await mailingComposeTemplate(payload); const c = await call('mailing_new', {title: payload.title, template: payload.template, kind: 'normal', accounts: payload.accounts, filters: {ids: payload.ids}}); toast('Черновик создан — ничего не отправлено'); state.mailingJustCreated = c.id; mlGo({mailingFromLeads: null, mailingTab: 'campaigns', mailingCampaign: c.id}); break; }
       case 'open-apps': await call('open_external', 'https://my.telegram.org/apps'); break;
       case 'use-script': { const form = document.querySelector('#ml-new-form'); const slug = document.querySelector('#ml-script').value; const scripts = await call('mailing_scripts', state.mailingDraft.filters.site_type || ''); const item = scripts.items.find(s => s.slug === slug); if (item) { form.querySelector('[name="template"]').value = item.body; mailingCollect(form); toast('Подсказка подставлена. Замените поля в [скобках]'); } break; }
       case 'preview': { const form = document.querySelector('#ml-new-form'); const payload = mailingCollect(form); const p = await call('mailing_preview', payload); document.querySelector('#ml-preview').innerHTML = `<div class="inline-note">Подходит организаций: ${E(p.total)}, с username: ${E(p.with_username)}${p.unfilled.length ? ` · <strong>замените: ${E(p.unfilled.join(', '))}</strong>` : ''}</div>${p.items.length ? p.items.map(x => `<div class="row"><span class="row-title">${E(x.name)}</span> <span class="muted">${E(x.city)} · ${E(ML.site[x.site_type] || x.site_type)} · ${x.username ? '@' + E(x.username) : 'нет username'}</span><pre class="ml-text">${E(x.text)}</pre></div>`).join('') : empty('Нет записей для предпросмотра')}`; break; }
@@ -226,6 +392,8 @@ document.addEventListener('click', event => {
       case 'run': if (!confirm('Начать реальную отправку?')) return; await call('mailing_run', id); toast('Отправка запущена'); render(); break;
       case 'pause': await call('mailing_pause', id); toast('Кампания на паузе'); render(); break;
       case 'refresh-campaign': await render(); toast('Статистика обновлена'); break;
+      case 'repeat-dry': { const c = await call('mailing_repeat', {...mailingRepeatCollect(), live: false}); state.mailingRepeat = null; toast('Повтор: сухой запуск готов — ничего не отправлено'); state.mailingJustCreated = c.id; mlGo({mailingCampaign: c.id}); break; }
+      case 'repeat-live': { const payload = mailingRepeatCollect(); const plan = await call('mailing_repeat_preview', payload.campaign_id); if (!confirm(`Отправить повтор ${plan.include.length} получателям?\n\n${plan.include.slice(0, 15).map(x => '• ' + x.name).join('\n')}${plan.include.length > 15 ? '\n…' : ''}`)) return; const c = await call('mailing_repeat', {...payload, live: true}); state.mailingRepeat = null; toast('Повтор запущен', true); mlGo({mailingCampaign: c.id}); break; }
       case 'delete': if (!confirm('Удалить кампанию?')) return; await call('mailing_remove', id); state.mailingCampaign = null; render(); break;
     }
   });
@@ -241,6 +409,7 @@ document.addEventListener('submit', event => {
     else if (f.id === 'ml-account-form') { await call('mailing_account_add', x.get('label'), x.get('phone'), x.get('is_test') === 'on'); toast('Аккаунт добавлен. Нажмите «Войти»'); render(); }
     else if (f.dataset.mlLoginCode) { const r = await call('mailing_login_code', f.dataset.mlLoginCode, x.get('code')); if (r.status === 'password_needed') state.mailingLogin[f.dataset.mlLoginCode] = {step: 'password'}; else { delete state.mailingLogin[f.dataset.mlLoginCode]; toast('Вход выполнен'); } render(); }
     else if (f.dataset.mlLoginPassword) { await call('mailing_login_password', f.dataset.mlLoginPassword, x.get('password')); delete state.mailingLogin[f.dataset.mlLoginPassword]; toast('Вход выполнен'); render(); }
+    else if (f.id === 'ml-compose-form') { const payload = mailingComposeCollect(f); payload.template = await mailingComposeTemplate(payload); if (!confirm(`Запустить рассылку на ${payload.ids.length} лидов?`)) return; const c = await call('mailing_launch', payload); toast('Рассылка запущена', true); mlGo({mailingFromLeads: null, mailingTab: 'campaigns', mailingCampaign: c.id}); }
     else if (f.id === 'ml-new-form') { const c = await call('mailing_new', mailingCollect(f)); toast('Кампания создана в режиме сухого запуска'); state.mailingDraft.title = ''; mlGo({mailingTab: 'campaigns', mailingCampaign: c.id}); }
     else if (f.id === 'ml-live-form') { await call('mailing_go_live', state.mailingCampaign, x.get('confirm')); state.mailingConfirm = ''; toast('Реальная отправка включена. Нажмите «Начать отправку»', true); render(); }
     else if (f.id === 'ml-stop-form') { await call('mailing_stop_add', x.get('kind'), x.get('value')); toast('Добавлено в стоп-лист'); render(); }
@@ -250,7 +419,7 @@ document.addEventListener('submit', event => {
 
 const mailingSetView = setView;
 setView = function (view, extra = {}) {
-  if (view === 'mailing' && extra.mailingCampaign === undefined) Object.assign(extra, {mailingCampaign: null, mailingTab: state.mailingTab === 'new' ? 'campaigns' : state.mailingTab});
+  if (view === 'mailing' && extra.mailingCampaign === undefined) Object.assign(extra, {mailingCampaign: null, mailingFromLeads: null, mailingTab: state.mailingTab === 'new' ? 'campaigns' : state.mailingTab});
   return mailingSetView(view, extra);
 };
 // app.js binds #refresh to the very first render(); later sections (scripts, mailing) were left

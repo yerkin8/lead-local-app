@@ -1,35 +1,17 @@
-# LeadEqualMoney — настольное приложение (Windows)
+# LeadEqualMoney Desktop
 
-Локальное приложение для поиска организаций на Яндекс Картах, CRM по найденной базе, фото и товаров из карточек, скриптов сообщений и (с собственными ключами Telegram) рассылки. Окно — pywebview + Microsoft Edge WebView2; HTTP-сервер не поднимается, данные хранятся только на компьютере пользователя.
+Local Windows app (Python + pywebview/WebView2, vanilla JS UI in `app/desktop_ui`, PyInstaller build via
+`build.ps1`). It finds small businesses on Yandex Maps without a website (or with a weak one) and helps
+write to them in Telegram. Everything stays on the owner's PC.
 
-Telegram Mini App, бот и серверное развёртывание в этот репозиторий не входят.
+Полное описание на русском — [README_RU.md](README_RU.md): разделы, поиск и кнопка «Остановить», работа
+с лидами, рассылка пачками (результат по каждому бизнесу, «Повторить пачку» с напоминанием, «Убрать из
+пачки», связь со статусами «Лидов»), где лежат данные и резервные копии, сборка и обновление скриптов.
 
-## Запуск из исходного кода
-
-Нужны Windows 10/11 x64, Python 3.12–3.14, Microsoft Edge WebView2 и Google Chrome (для парсинга).
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-desktop.txt
-.\run-desktop.ps1
-```
-
-## Сборка
-
-```powershell
-.\build.ps1
-```
-
-Скрипт создаёт чистое окружение `.build-venv` из `requirements-exe-lock.txt` и собирает папку `dist\LeadEqualMoney\` с `LeadEqualMoney.exe` (PyInstaller, `packaging\LeadEqualMoney-onedir.spec`). Ярлык создаёт `create_shortcut.ps1`. Проверки: `scripts\verify.ps1`.
-
-## Данные и секреты
-
-В репозитории нет ключей, сессий Telegram, баз и выгрузок:
-
-- база, логи, медиа и данные рассылки создаются в `%APPDATA%\LeadEqualMoney`;
-- ключи Telegram (`api_id`, `api_hash`) и вход в аккаунт вводятся в окне приложения и хранятся там же в зашифрованном виде (DPAPI текущего пользователя Windows);
-- в `secrets\` лежат только пустые примеры; настоящие файлы владелец создаёт сам, они исключены `.gitignore`.
-
-Каждый пользователь вводит **свои** ключи Telegram: передавать `api_id/api_hash` третьим лицам Telegram запрещает.
-
-Лицензии сторонних компонентов — в `THIRD_PARTY.md`.
+- Sections: Лиды · Итоги · Сегодня · Поиск · Скрипты · ИИ-чат · Рассылка · Медиа · Настройки.
+- Data: `%APPDATA%\LeadEqualMoney` (`app.sqlite3`, `mailing\`, `backups\`). Keys and Telegram sessions are
+  encrypted with Windows DPAPI for the current user.
+- Check: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1` (must be PASS).
+- Build: `powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1` → `dist\LeadEqualMoney\`.
+- Docs: `docs/unify/` (Mini App merge, redesign), `docs/mailing/` (mailing module), `docs/next/` (search speed,
+  stop, batches and repeats). The server Mini App lives in a separate repository.

@@ -37,9 +37,7 @@ a {
   text-decoration-thickness: 1px;
 }
 
-a:hover {
-  color: var(--accent-action-hover);
-}
+
 
 .skip-link {
   position: fixed;
@@ -140,10 +138,7 @@ a:hover {
   color: currentColor;
 }
 
-.sidebar nav button:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
+
 
 .sidebar nav button.active {
   border-color: var(--border);
@@ -181,7 +176,7 @@ a:hover {
 
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .business-row{transition:border-color var(--motion-fast),background var(--motion-fast),box-shadow var(--motion-fast)}
-.business-row:hover,.business-row:focus-visible{border-color:var(--accent);background:var(--bg-hover);box-shadow:var(--shadow-hover);outline:0}
+.business-row:focus-visible {border-color:var(--accent);background:var(--bg-hover);box-shadow:var(--shadow-hover);outline:0}
 .business-row-copy{min-width:0}.business-row .chips{margin-top:8px}
 .status-control{display:inline-flex;border-left:4px solid var(--accent);border-radius:var(--radius-sm)}
 .status-control select{min-height:44px;max-width:180px;border-radius:0 var(--radius-sm) var(--radius-sm) 0}
@@ -400,23 +395,15 @@ p {
   height: 18px;
 }
 
-.btn:hover,
-.ghost:hover,
-.tab:hover {
-  border-color: var(--accent);
-  background: var(--bg-hover);
-}
+
 
 .btn.primary {
   border-color: var(--accent-action);
   background: var(--accent-action);
-  color: var(--bg-secondary);
+  color: var(--on-accent);
 }
 
-.btn.primary:hover {
-  border-color: var(--accent-action-hover);
-  background: var(--accent-action-hover);
-}
+
 
 .ghost {
   background: var(--transparent);
@@ -429,10 +416,7 @@ p {
   color: var(--error-text);
 }
 
-.danger:hover {
-  border-color: var(--error);
-  background: var(--error-bg);
-}
+
 
 .btn:disabled,
 .ghost:disabled,
@@ -527,10 +511,7 @@ label.field {
   transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
 }
 
-.row:hover {
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow);
-}
+
 
 .row-head > :first-child,
 .recipient-row > span:nth-child(2) {
@@ -697,7 +678,6 @@ label.field {
   text-align: left;
 }
 
-.script-list button:hover,
 .script-list button.active {
   border-color: var(--accent);
   background: var(--bg-soft);
@@ -1049,3 +1029,207 @@ textarea:focus-visible {
     gap: 3px;
   }
 }
+
+/* Статистика */
+.stat-list { display: grid; gap: 10px; margin-top: 12px; }
+.stat-bar-head, .stat-row { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.stat-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.stat-row:last-child { border-bottom: 0; }
+.stat-row span { min-width: 0; overflow-wrap: anywhere; color: var(--text-secondary); }
+.stat-bar-track { height: 8px; margin-top: 5px; border-radius: 99px; background: var(--bg-hover); overflow: hidden; }
+.stat-bar-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+
+/* «Сегодня» */
+.today-progress-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin-bottom: 10px; }
+.today-progress h2 { margin: 2px 0 0; font-size: 22px; font-weight: 600; }
+.today-progress h2 b { font-size: 30px; }
+.today-progress .stat-bar-track { height: 10px; }
+.today-wait { padding: 6px 10px; border-radius: 99px; background: var(--warning-bg); color: var(--warning-text); font-size: 13px; white-space: nowrap; }
+.today-warning { border-color: var(--warning-border); background: var(--warning-bg); }
+.today-warning p { margin: 8px 0; line-height: 1.5; }
+.today-contacts { border: 0; padding: 0; margin: 14px 0; display: grid; gap: 8px; }
+.today-contacts legend { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+.today-contact { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.today-contact:has(input:checked) { border-color: var(--accent); background: var(--bg-soft); }
+.today-contact span { font-weight: 600; font-variant-numeric: tabular-nums; }
+.today-contact small { margin-left: auto; color: var(--text-secondary); }
+.today-current textarea { min-height: 180px; line-height: 1.45; }
+.today-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.today-open { flex: 1 1 220px; min-height: 48px; font-size: 16px; }
+.today-open:disabled { opacity: 0.55; cursor: not-allowed; }
+.today-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.today-results .btn { min-height: 44px; }
+.today-results .btn.primary { grid-column: 1 / -1; }
+.today-results .btn.danger { grid-column: 1 / -1; }
+.today-sheet { position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-end; justify-content: center; background: var(--scrim); }
+.today-sheet-panel { width: min(520px, 100%); padding: 20px 16px calc(16px + env(safe-area-inset-bottom, 0px)); border-radius: 18px 18px 0 0; background: var(--bg-secondary); box-shadow: var(--shadow-dialog); animation: today-sheet-in 0.22s cubic-bezier(0.32, 0.72, 0, 1); }
+.today-sheet-panel h2 { margin: 0; }
+.today-sheet-panel > .ghost { width: 100%; margin-top: 8px; }
+@keyframes today-sheet-in { from { transform: translateY(100%); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .today-sheet-panel { animation: none; } }
+@media (min-width: 761px) { .today-sheet { align-items: center; } .today-sheet-panel { border-radius: 18px; } }
+
+/* Charts (Статистика): one hue, thin bars, rounded data ends, recessive tracks. */
+.chart-panel h2 { margin-bottom: 2px; }
+.chart-funnel, .chart-bars { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 12px; }
+.chart-funnel-text, .chart-bar-head { display: flex; align-items: baseline; gap: 8px; font-size: 14px; }
+.chart-funnel-text span, .chart-bar-head span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.chart-funnel-text b, .chart-bar-head b { margin-left: auto; font-variant-numeric: tabular-nums; }
+.chart-funnel-text small, .chart-bar-head small { min-width: 70px; text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.chart-bar-head small { min-width: 36px; }
+.chart-track { height: 10px; margin-top: 6px; border-radius: 0 4px 4px 0; background: var(--bg-hover); overflow: hidden; }
+.chart-track i { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--accent); }
+.chart-funnel .chart-track { height: 14px; }
+.chart-funnel .tone-0 { background: var(--chart-1); }
+.chart-funnel .tone-1 { background: var(--chart-2); }
+.chart-funnel .tone-2 { background: var(--chart-3); }
+.chart-funnel .tone-3 { background: var(--chart-4); }
+.chart-readout { min-height: 20px; margin: 10px 0 4px; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart-columns { display: grid; grid-template-columns: repeat(14, minmax(0, 1fr)); gap: 2px; align-items: end; height: 150px;
+  padding-top: 6px; border-bottom: 1px solid var(--border); }
+.chart-column { position: relative; height: 100%; min-height: 0 !important; padding: 0 0 18px; border: 0; background: transparent;
+  display: flex; flex-direction: column; justify-content: flex-end; cursor: pointer; }
+.chart-column i { display: block; width: 100%; max-width: 22px; margin: 0 auto; border-radius: 4px 4px 0 0; background: var(--accent); }
+.chart-column span { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--text-secondary); white-space: nowrap; }
+.chart-column.active i { background: var(--chart-4); }
+.chart-column:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
+.today-segments { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 12px; border-radius: 12px; background: var(--bg-hover); }
+.today-segments button { min-height: 40px; border: 0; border-radius: 9px; background: transparent; color: var(--text-secondary); font-weight: 600; }
+.today-segments button.active { background: var(--bg-secondary); color: var(--text-primary); box-shadow: var(--shadow); }
+.today-segments b { margin-left: 4px; color: var(--accent-action); }
+.today-status-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.today-status-actions .btn, .today-status-actions .ghost { flex: 1 1 auto; min-height: 40px; }
+
+
+/* Hover only where a precise pointer exists: on touch screens :hover sticks after a tap. */
+@media (hover: hover) and (pointer: fine) {
+  a:hover {
+    color: var(--accent-action-hover);
+  }
+  .sidebar nav button:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .business-row:hover {border-color:var(--accent);background:var(--bg-hover);box-shadow:var(--shadow-hover);outline:0}
+  .btn:hover,.ghost:hover,.tab:hover {
+    border-color: var(--accent);
+    background: var(--bg-hover);
+  }
+  .btn.primary:hover {
+    border-color: var(--accent-action-hover);
+    background: var(--accent-action-hover);
+  }
+  .danger:hover {
+    border-color: var(--error);
+    background: var(--error-bg);
+  }
+  .row:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow);
+  }
+  .script-list button:hover {
+    border-color: var(--accent);
+    background: var(--bg-soft);
+    color: var(--accent-soft-text);
+  }
+  .chart-column:hover i { background: var(--chart-4); }
+}
+
+/* «Скрипты»: groups category → stage; card offers (docs/rewrite/TAXONOMY.md). */
+.script-group { margin-bottom: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-primary, transparent); }
+.script-group > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 10px 12px; cursor: pointer; font-weight: 600; list-style: none; }
+.script-group > summary::-webkit-details-marker { display: none; }
+.script-group > summary::after { content: '▸'; color: var(--text-secondary); }
+.script-group[open] > summary::after { content: '▾'; }
+.script-group > summary b { margin-left: auto; color: var(--text-secondary); font-weight: 500; font-size: 12px; }
+.script-definition { margin: 0 12px 10px; color: var(--text-secondary); font-size: 13px; line-height: 1.4; }
+.script-stage { padding: 0 8px 4px; }
+.script-stage h4 { margin: 8px 4px 6px; color: var(--text-secondary); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.script-list .script-stage button { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.script-subtype { margin-left: auto; padding: 1px 7px; border-radius: 999px; background: var(--bg-soft); color: var(--text-secondary); font-size: 11px; }
+.script-slug { font-size: 12px; color: var(--text-secondary); }
+.proposal-panel.has-offers { position: static; }
+.offer-list { display: grid; gap: 10px; margin: 12px 0; }
+.offer { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.offer header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.offer .offer-copy { min-height: 36px; padding: 6px 12px; }
+.offer .offer-text { width: 100%; min-height: 110px; resize: vertical; box-sizing: border-box; }
+.offer p { margin: 0; }
+.other-script { margin-top: 14px; }
+.other-script > summary { min-height: 40px; padding: 8px 0; cursor: pointer; color: var(--accent-action); }
+.lead-more-block .offer-list { margin: 8px 0 4px; }
+
+/* Desktop hover states (the Mini App moved them to polish.css, which Desktop does not load). */
+a:hover {
+  color: var(--accent-action-hover);
+}
+.sidebar nav button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.business-row:hover,.business-row:focus-visible{border-color:var(--accent);background:var(--bg-hover);box-shadow:var(--shadow-hover);outline:0}
+.btn:hover,
+.ghost:hover,
+.tab:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+.btn.primary:hover {
+  border-color: var(--accent-action-hover);
+  background: var(--accent-action-hover);
+}
+.danger:hover {
+  border-color: var(--error);
+  background: var(--error-bg);
+}
+.row:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+}
+.script-list button:hover,
+
+/* Card header: «Медиа» and «В «Сегодня»» wrap under the title in the narrow left column. */
+.business-detail-grid .panel-head { flex-wrap: wrap; gap: 10px; }
+
+/* Long Windows paths (data folder) wrap instead of widening the page. */
+.two-cols .panel p, #ai-key-panel p { overflow-wrap: anywhere; }
+
+/* «Настройки» (settings.js): groups of panels, theme switch. */
+.settings-page { display: grid; gap: 16px; max-width: 920px; }
+.settings-group { display: grid; gap: 12px; }
+.settings-group-title { margin: 8px 0 0; font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-secondary); }
+.settings-page .panel { margin: 0; }
+.settings-theme { margin: 12px 0 0; }
+
+/* === Layout guard (redesign 06) ===
+   Root cause of the "floating" form fields: label.field is a grid and .form-grid stretched every
+   cell to the tallest one (the cities textarea); the label's own grid then spread that extra height
+   into its rows, so inputs/selects grew to ~85px and shifted with label line count.
+   Keep this block last: it pins one control height and a common top line for every form row. */
+.form-grid { align-items: start; }
+label.field { align-content: start; grid-auto-rows: auto; }
+label.field > :is(span, b):first-child,
+.form-grid > label.field { line-height: 1.35; }
+.form-grid > label.field { white-space: nowrap; }
+.form-grid > label.field > * { white-space: normal; }
+label.field input:not([type="checkbox"]):not([type="radio"]),
+label.field select {
+  height: 42px;
+  min-height: 42px;
+  max-height: 42px;
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 40px;
+}
+.form-grid > label.field textarea { min-height: 42px; height: 42px; max-height: 160px; padding-top: 10px; line-height: 1.35; }
+label.field > small { margin-top: -2px; font-weight: 400; font-size: 12px; line-height: 1.35; color: var(--text-secondary); }
+.toolbar > :is(button, .btn, .ghost, input, select) { min-height: 40px; }
+.facts dd, .row-title, .chip { overflow-wrap: break-word; word-break: normal; }
+.facts dd a { overflow-wrap: anywhere; }
+.content { overflow-x: hidden; }
+
+/* Settings forms (09-review-fixes): field and its «Сохранить» in one row, button on the input line, labels wrap. */
+.settings-page form.form-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 16px; }
+.settings-page form.form-grid > label.field { flex: 1 1 240px; white-space: normal; }
+.settings-page form.form-grid > :is(div, .toolbar):has(> .btn) { flex: 0 0 auto; margin-top: 24px; }
+.sidebar-bottom small#data-dir { font-family: inherit; cursor: help; }

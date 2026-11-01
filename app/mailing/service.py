@@ -31,6 +31,12 @@ NOT_USERNAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "socks
 BRACKETS = re.compile(r"\[[^\]]+\]")
 CONFIRM_WORD = "ОТПРАВИТЬ"
 MAX_TEST_RECIPIENTS = 5
+AUTO_SCRIPT = "auto"  # each business gets the first-message script for its site type
+AUTO_REMINDER = "auto:reminder"  # each business gets the reminder script (follow-up stage)
+# Lead statuses in «Лиды» that leave a business out of repeats by default (already talking or refused).
+REPEAT_SKIP_STATUSES = {"replied": "Ответили", "working": "В работе", "completed": "Договорились",
+                        "unsuitable": "Отказ"}
+MAX_SELECTED = 500  # leads picked in «Лиды» for one campaign
 
 
 def normalize_target(value: str) -> str:
@@ -83,6 +89,8 @@ class MailingService:
                  render: Callable[[str, dict], str],
                  first_by_site_type: dict[str, str],
                  external_blocked: Callable[[], set[str]] = lambda: set(),
+                 reminder_slug: str = "site.reminder",
+                 lead_events: Callable[[str, dict], None] | None = None,
                  engine_options: dict | None = None):
         get_logger()  # attach the masking filter to the log handlers configured by now
         self.dir = Path(data_dir) / "mailing"
@@ -95,11 +103,15 @@ class MailingService:
         self._templates = templates
         self._render = render
         self._first_by_site_type = first_by_site_type
+        self._reminder_slug = reminder_slug
+        self._lead_events = lead_events or (lambda _kind, _data: None)
+        self._external_blocked = external_blocked
         self._logins: dict[int, dict] = {}
         self._lock = threading.RLock()
         self.engine = Engine(self.store, gateway, credentials=self._credentials,
                              save_session=self._save_session, policy=self.policy,
                              test_recipients=self.test_recipients, external_blocked=external_blocked,
+                             on_sent=self._after_sent, on_reply=self._after_reply,
                              **(engine_options or {}))
 
     # ------------------------------------------------------------ lifecycle
@@ -132,6 +144,12 @@ class MailingService:
         write_secret(self._keys_path, {"api_id": api_id, "api_hash": api_hash.lower()})
         self.store.event("keys", "Ключи API сохранены (зашифрованы)")
         return {"api_id": mask_digits(api_id)}
+
+    def clear_keys(self) -> dict:
+        """Forget api_id/api_hash; signed-in sessions stay but cannot connect until keys are entered again."""
+        self._keys_path.unlink(missing_ok=True)
+        self.store.event("keys", "Ключи API удалены")
+        return {"keys_configured": False}
 
     def import_owner_file(self, path: str) -> dict:
         """Read the owner's secrets/accounts.json (or accounts.local.json) and encrypt what is inside."""
@@ -340,6 +358,14 @@ class MailingService:
     def _select(self, filters: dict) -> list[dict]:
         filters = dict(filters or {})
         contact = filters.pop("contact", "username")
+        if filters.get("ids"):
+            items, seen = [], set()
+            for identity in [str(x) for x in filters["ids"]][:MAX_SELECTED]:
+                item = None if identity in seen else self._business(identity)
+                seen.add(identity)
+                if item:
+                    items.append({**item, "_username": username_from_business(item), "_phones": phone_keys(item)})
+            return items
         query = {key: filters[key] for key in ("niche", "country", "city", "site_type", "status", "q")
                  if filters.get(key)}
         items = []
@@ -352,8 +378,25 @@ class MailingService:
             items.append({**item, "_username": username, "_phones": phones})
         return items
 
+    def _template_for(self, template: str, business: dict) -> str:
+        """AUTO_SCRIPT: the first-message script that fits this business's site type;
+        AUTO_REMINDER: the reminder script."""
+        if template not in (AUTO_SCRIPT, AUTO_REMINDER):
+            return template
+        bodies = {row["slug"]: row["body"] for row in self._templates()}
+        if template == AUTO_REMINDER:
+            body = bodies.get(self._reminder_slug, "")
+            if not body:
+                raise ValueError("Нет скрипта напоминания (site.reminder) в «Скриптах»")
+            return body
+        slug = self._first_by_site_type.get(business.get("site_type") or "", "")
+        body = bodies.get(slug) or bodies.get(self._first_by_site_type.get("", "")) or next(iter(bodies.values()), "")
+        if not body:
+            raise ValueError("Нет скриптов первого сообщения")
+        return body
+
     def _message(self, template: str, business: dict) -> str:
-        return with_footer(self._render(template, business))
+        return with_footer(self._render(self._template_for(template, business), business))
 
     def preview(self, template: str, filters: dict, kind: str = "normal") -> dict:
         template = str(template or "").strip()
@@ -370,12 +413,12 @@ class MailingService:
                          "text": self._message(template, item)})
             if len(rows) == 3:
                 break
-        problems = sorted(set(BRACKETS.findall(template)))
+        problems = [] if template == AUTO_SCRIPT else sorted(set(BRACKETS.findall(template)))
         return {"total": len(selected), "items": rows, "unfilled": problems,
                 "with_username": sum(1 for item in selected if item["_username"])}
 
     def create_campaign(self, title: str, filters: dict, template: str, account_ids: list,
-                        kind: str = "normal", limit: int | None = None) -> dict:
+                        kind: str = "normal", limit: int | None = None, *, batch: dict | None = None) -> dict:
         template = str(template or "").strip()
         if not template:
             raise ValueError("Введите текст сообщения")
@@ -398,15 +441,19 @@ class MailingService:
         if limit:
             selected = selected[:int(limit)]
         if not selected:
-            raise ValueError("По фильтрам не найдено организаций с контактом Telegram")
+            raise ValueError("Среди выбранных нет организаций с контактом Telegram" if (filters or {}).get("ids")
+                             else "По фильтрам не найдено организаций с контактом Telegram")
         stop = self.store.stop_set()
+        by_ids = bool((filters or {}).get("ids"))
         now = iso(utcnow())
         with self.store.tx() as conn:
+            batch = batch or {}
             campaign_id = conn.execute(
-                "INSERT INTO campaigns (title,kind,mode,status,template,filters_json,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO campaigns (title,kind,mode,status,template,filters_json,created_at,updated_at,"
+                "batch_id,parent_id,stage) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (str(title or "").strip()[:120] or "Новая рассылка", kind, "dry", "draft", template,
-                 json.dumps(filters or {}, ensure_ascii=False), now, now)).lastrowid
+                 json.dumps(filters or {}, ensure_ascii=False), now, now, batch.get("batch_id"),
+                 batch.get("parent_id"), batch.get("stage") or "first")).lastrowid
             conn.executemany("INSERT INTO campaign_accounts VALUES (?,?)", [(campaign_id, a["id"]) for a in accounts])
             seen_phones: set[str] = set()
             seen_keys: set[str] = set()
@@ -420,8 +467,10 @@ class MailingService:
                     username = item["_username"]
                     key = username or f"business:{item['id']}"
                     tz = recipient_tz(item.get("city"), item.get("country"))
-                    if item["id"] in stop["business"] or username in stop["username"] or set(item["_phones"]) & stop["phone"]:
+                    if item["id"] in stop["business"] or (username and username in stop["username"]) or set(item["_phones"]) & stop["phone"]:
                         status, reason_kind, reason = "skipped", "stoplist", "В стоп-листе"
+                    elif by_ids and not username:
+                        status, reason_kind, reason = "skipped", "no_contact", "Нет username Telegram"
                     elif key in seen_keys:
                         status, reason_kind, reason = "skipped", "duplicate", "Тот же username у другой организации"
                         key = f"dup:{item['id']}"
@@ -439,9 +488,190 @@ class MailingService:
                              campaign_id=campaign_id, conn=conn)
         return self.campaign(campaign_id)
 
+    def launch(self, title: str, ids: list, template: str, account_ids: list, confirm: str) -> dict:
+        """One button: a campaign for a batch of leads, live, started. The confirm word stays mandatory;
+        limits, windows, stop-list and pauses are the same as for any campaign."""
+        if str(confirm or "").strip().upper() != CONFIRM_WORD:
+            raise ValueError(f"Чтобы запустить рассылку, введите слово {CONFIRM_WORD}")
+        if self.store.setting("emergency_stop", False):
+            raise ValueError("Включён аварийный стоп. Снимите его в разделе «Рассылка»")
+        ids = [str(x) for x in ids or []][:self.policy().batch_limit]
+        campaign = self.create_campaign(title, {"ids": ids}, template, account_ids)
+        self.enable_live(campaign["id"], confirm)
+        return self.run(campaign["id"])
+
+    def _editable(self, campaign_id: int, recipient_id: int) -> tuple[dict, dict]:
+        campaign = self.store.row("SELECT * FROM campaigns WHERE id=?", (int(campaign_id),))
+        if not campaign:
+            raise ValueError("Кампания не найдена")
+        if campaign["status"] == "running":
+            raise ValueError("Кампания идёт — поставьте её на паузу, чтобы менять тексты")
+        recipient = self.store.row("SELECT * FROM recipients WHERE id=? AND campaign_id=?",
+                                   (int(recipient_id), campaign["id"]))
+        if not recipient:
+            raise ValueError("Получатель не найден")
+        if recipient["status"] not in ("queued", "dry_sent"):
+            raise ValueError("Этому получателю текст уже не изменить: сообщение отправлено или он пропущен")
+        return campaign, recipient
+
+    def set_message(self, campaign_id: int, recipient_id: int, text: str) -> dict:
+        """Personal text for one recipient before sending. Opt-out line is always kept."""
+        campaign, recipient = self._editable(campaign_id, recipient_id)
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("Текст сообщения пустой")
+        if len(text) > 4000:
+            raise ValueError("Сообщение длиннее 4000 символов")
+        if BRACKETS.search(text):
+            raise ValueError("Замените поля в квадратных скобках: " + ", ".join(sorted(set(BRACKETS.findall(text)))))
+        message = with_footer(text)
+        with self.store.tx() as conn:
+            conn.execute("UPDATE recipients SET message=?,edited=1 WHERE id=?", (message, recipient["id"]))
+            self.store.event("message_edited", f"Текст изменён вручную: {recipient['business_name']}",
+                             campaign_id=campaign["id"], conn=conn)
+        return {"id": recipient["id"], "message": message, "edited": 1}
+
+    def reset_message(self, campaign_id: int, recipient_id: int) -> dict:
+        campaign, recipient = self._editable(campaign_id, recipient_id)
+        business = self._business(recipient["business_id"]) or {"name": recipient["business_name"]}
+        message = self._message(campaign["template"], business)
+        with self.store.tx() as conn:
+            conn.execute("UPDATE recipients SET message=?,edited=0 WHERE id=?", (message, recipient["id"]))
+        return {"id": recipient["id"], "message": message, "edited": 0}
+
+    # ------------------------------------------------------------ batches and repeats
+    def _batch_id(self, campaign: dict) -> int:
+        return int(campaign.get("batch_id") or campaign["id"])
+
+    def _batch_row(self, campaign_id: int) -> dict:
+        campaign = self.store.row("SELECT * FROM campaigns WHERE id=?", (int(campaign_id),))
+        if not campaign:
+            raise ValueError("Кампания не найдена")
+        return campaign
+
+    def exclude(self, campaign_id: int, business_id: str, reason: str = "") -> dict:
+        """«Убрать из пачки»: the business gets no repeat of this batch; a queued message is withdrawn."""
+        campaign = self._batch_row(campaign_id)
+        batch_id = self._batch_id(campaign)
+        business_id = str(business_id)
+        if not self.store.value("SELECT 1 FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
+                                "WHERE COALESCE(c.batch_id,c.id)=? AND r.business_id=?", (batch_id, business_id)):
+            raise ValueError("Этой организации нет в пачке")
+        with self.store.tx() as conn:
+            conn.execute("INSERT OR IGNORE INTO batch_exclusions VALUES (?,?,?,?)",
+                         (batch_id, business_id, str(reason or "Убран вручную")[:200], iso(utcnow())))
+            withdrawn = conn.execute(
+                "UPDATE recipients SET status='skipped',reason_kind='excluded',reason='Убран из пачки' "
+                "WHERE status='queued' AND business_id=? AND campaign_id IN "
+                "(SELECT id FROM campaigns WHERE COALESCE(batch_id,id)=?)", (business_id, batch_id)).rowcount
+            name = conn.execute("SELECT business_name FROM recipients WHERE business_id=? LIMIT 1",
+                                (business_id,)).fetchone()
+            self.store.event("batch_exclude", f"Убран из пачки: {name[0] if name else business_id}",
+                             campaign_id=batch_id, conn=conn)
+        return {"excluded": True, "withdrawn": withdrawn}
+
+    def include(self, campaign_id: int, business_id: str) -> dict:
+        """Undo «Убрать из пачки» for future repeats (already skipped messages stay skipped)."""
+        campaign = self._batch_row(campaign_id)
+        with self.store.tx() as conn:
+            conn.execute("DELETE FROM batch_exclusions WHERE batch_id=? AND business_id=?",
+                         (self._batch_id(campaign), str(business_id)))
+        return {"excluded": False}
+
+    def repeat_preview(self, campaign_id: int) -> dict:
+        """Who gets a repeat of this campaign: those who got (or in a dry run would get) its message,
+        minus excluded, replied, stop-list, «Не писать» and leads already talking or refused."""
+        source = self._batch_row(campaign_id)
+        batch_id = self._batch_id(source)
+        excluded = {row["business_id"] for row in self.store.rows(
+            "SELECT business_id FROM batch_exclusions WHERE batch_id=?", (batch_id,))}
+        replied = {row["business_id"] for row in self.store.rows(
+            "SELECT DISTINCT r.business_id FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
+            "WHERE COALESCE(c.batch_id,c.id)=? AND r.replied_at IS NOT NULL", (batch_id,))}
+        stop = self.store.stop_set()
+        blocked = set(self._external_blocked() or ())
+        include, skip = [], []
+        seen = set()
+        for row in self.store.rows("SELECT business_id,business_name,username,phones,status FROM recipients "
+                                   "WHERE campaign_id=? ORDER BY position", (source["id"],)):
+            if row["business_id"] in seen:
+                continue
+            seen.add(row["business_id"])
+            business = self._business(row["business_id"]) or {}
+            status = business.get("status") or ""
+            phones = {item for item in (row["phones"] or "").split(",") if item}
+            username = row["username"] if source["kind"] == "normal" else ""
+            reason = ""
+            if row["status"] not in ("sent", "dry_sent"):
+                reason = ("Первое сообщение не дошло" if row["status"] in ("failed", "unreachable")
+                          else "Не получал сообщение")
+            elif row["business_id"] in excluded:
+                reason = "Убран из пачки"
+            elif row["business_id"] in replied:
+                reason = "Ответил в Telegram"
+            elif status in REPEAT_SKIP_STATUSES:
+                reason = f"В «Лидах»: {REPEAT_SKIP_STATUSES[status]}"
+            elif (row["business_id"] in stop["business"] or row["business_id"] in blocked
+                  or (username and username in stop["username"]) or phones & stop["phone"]):
+                reason = "В стоп-листе или «Не писать»"
+            elif not business:
+                reason = "Организации больше нет в базе"
+            item = {"business_id": row["business_id"], "name": row["business_name"], "reason": reason,
+                    "lead_status": status}
+            (skip if reason else include).append(item)
+        return {"campaign_id": source["id"], "batch_id": batch_id, "kind": source["kind"],
+                "include": include, "skip": skip,
+                "accounts": [row["account_id"] for row in self.store.rows(
+                    "SELECT account_id FROM campaign_accounts WHERE campaign_id=?", (source["id"],))]}
+
+    def repeat(self, campaign_id: int, template: str = AUTO_REMINDER, title: str = "",
+               account_ids: list | None = None, live: bool = False, confirm: str = "") -> dict:
+        """«Повторить пачку»: same batch, another text (by default the reminder). A dry run unless
+        ``live`` and the confirm word; limits, windows, stop-list and pauses as for any campaign."""
+        template = str(template or "").strip() or AUTO_REMINDER
+        if live:
+            if str(confirm or "").strip().upper() != CONFIRM_WORD:
+                raise ValueError(f"Чтобы запустить повтор, введите слово {CONFIRM_WORD}")
+            if self.store.setting("emergency_stop", False):
+                raise ValueError("Включён аварийный стоп. Снимите его в разделе «Рассылка»")
+        source = self._batch_row(campaign_id)
+        if source["status"] == "running":
+            raise ValueError("Кампания ещё идёт — повторить можно после её окончания или на паузе")
+        if live and source["mode"] != "live":
+            raise ValueError("Это был сухой запуск: первое сообщение никто не получил. Повтор — тоже только сухой")
+        plan = self.repeat_preview(source["id"])
+        ids = [item["business_id"] for item in plan["include"]]
+        if not ids:
+            raise ValueError("В повтор некого включить: все ответили, убраны или в стоп-листе")
+        stage = "reminder" if template == AUTO_REMINDER else "repeat"
+        root = self._batch_row(plan["batch_id"])
+        title = str(title or "").strip() or f"{root['title']} · {'напоминание' if stage == 'reminder' else 'повтор'}"
+        campaign = self.create_campaign(title, {"ids": ids, "repeat_of": source["id"]}, template,
+                                        account_ids or plan["accounts"], kind=source["kind"],
+                                        batch={"batch_id": plan["batch_id"], "parent_id": source["id"],
+                                               "stage": stage})
+        self.store.event("batch_repeat", f"Повтор пачки: {len(ids)} получателей, пропущено {len(plan['skip'])}",
+                         campaign_id=campaign["id"])
+        if not live:
+            return self.dry_run(campaign["id"])
+        self.enable_live(campaign["id"], confirm)
+        return self.run(campaign["id"])
+
+    def _after_sent(self, recipient: dict) -> None:
+        """A live message reached a real business: «Лиды» get «Написал» and a reminder entry."""
+        campaign = self.store.row("SELECT kind,mode,stage FROM campaigns WHERE id=?", (recipient["campaign_id"],))
+        if not campaign or campaign["kind"] != "normal" or campaign["mode"] != "live":
+            return
+        row = self.store.row("SELECT business_id,username,message FROM recipients WHERE id=?", (recipient["id"],))
+        if row:
+            self._lead_events("sent", {**row, "stage": campaign["stage"] or "first"})
+
+    def _after_reply(self, recipient: dict, is_stop: bool) -> None:
+        self._lead_events("stop" if is_stop else "replied", {"business_id": recipient["business_id"]})
+
     def campaigns(self) -> list[dict]:
-        rows = self.store.rows("SELECT id,title,kind,mode,status,stop_reason,created_at,updated_at FROM campaigns "
-                               "ORDER BY id DESC")
+        rows = self.store.rows("SELECT id,title,kind,mode,status,stop_reason,created_at,updated_at,"
+                               "COALESCE(batch_id,id) AS batch_id,parent_id,stage FROM campaigns ORDER BY id DESC")
         for row in rows:
             row["counts"] = self._counts(row["id"])
         return rows
@@ -464,12 +694,25 @@ class MailingService:
             "LEFT JOIN recipients r ON r.campaign_id=ca.campaign_id AND r.account_id=a.id "
             "WHERE ca.campaign_id=? GROUP BY a.id ORDER BY a.id", (row["id"],))
         recipients = self.store.rows(
-            "SELECT id,business_id,business_name,account_id,username,status,reason,msg_id,sent_at,replied_at,message "
+            "SELECT id,business_id,business_name,account_id,username,status,reason_kind,reason,msg_id,sent_at,"
+            "replied_at,message,edited "
             "FROM recipients WHERE campaign_id=? ORDER BY position LIMIT ?", (row["id"], int(recipients_limit)))
         test_kind = row["kind"] == "test"
+        batch_id = self._batch_id(row)
+        excluded = {item["business_id"] for item in self.store.rows(
+            "SELECT business_id FROM batch_exclusions WHERE batch_id=?", (batch_id,))}
         for item in recipients:
             if test_kind and item["username"] and item["username"].startswith("+"):
                 item["username"] = mask_digits(item["username"])
+            business = self._business(item["business_id"]) or {}
+            item["lead_status"] = business.get("status") or ""
+            item["excluded"] = item["business_id"] in excluded
+        row["batch_id"] = batch_id
+        row["batch"] = self.store.rows(
+            "SELECT id,title,stage,mode,status,created_at FROM campaigns WHERE COALESCE(batch_id,id)=? ORDER BY id",
+            (batch_id,))
+        for item in row["batch"]:
+            item["counts"] = self._counts(item["id"])
         row["recipients"] = recipients
         row["events"] = self.store.rows("SELECT at,level,kind,message FROM events WHERE campaign_id=? "
                                         "ORDER BY id DESC LIMIT 50", (row["id"],))
