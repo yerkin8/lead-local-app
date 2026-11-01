@@ -120,5 +120,9 @@ class TelegramGateway(ABC):
     async def find_outgoing(self, account_id: int, peer: Peer, text: str, since: datetime) -> int | None:
         """Message id of our message with this text sent after `since`, if any."""
 
+    async def incoming_after(self, account_id: int, peer: Peer, after_msg_id: int) -> list[tuple[int, str]]:
+        """Incoming messages from this peer with id > after_msg_id, oldest first: (msg_id, text)."""
+        return []
+
     @abstractmethod
     def set_incoming_handler(self, handler: IncomingHandler | None) -> None: ...

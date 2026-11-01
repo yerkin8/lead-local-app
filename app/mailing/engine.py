@@ -17,6 +17,10 @@ from .policy import DEFAULT_TZ, Policy, zone
 from .store import Store, iso, parse, utcnow
 
 log = get_logger()
+# Lead statuses in «Лиды» that leave a business out of repeats (already talking or refused).
+REPEAT_SKIP_STATUSES = {"replied": "Ответили", "working": "В работе", "completed": "Договорились",
+                        "unsuitable": "Отказ"}
+CATCH_UP_DAYS = 60  # replies to messages older than this are not looked for after a restart
 STOP_WORDS = re.compile(r"\b(стоп|stop|не\s*пиш\w*|отпиш\w*|не\s*интересн\w*|удалите\s+меня)\b", re.I)
 
 
@@ -44,6 +48,7 @@ class Engine:
                  external_blocked: Callable[[], set[str]] | None = None,
                  on_sent: Callable[[dict], None] | None = None,
                  on_reply: Callable[[dict, bool], None] | None = None,
+                 lead_status: Callable[[str], str] | None = None,
                  clock: Callable[[], datetime] = utcnow,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  tick: float = 0.25, rng: random.Random | None = None):
@@ -56,6 +61,7 @@ class Engine:
         self.external_blocked = external_blocked or (lambda: set())
         self.on_sent = on_sent or (lambda _recipient: None)
         self.on_reply = on_reply or (lambda _recipient, _stop: None)
+        self.lead_status = lead_status or (lambda _business_id: "")
         self.clock = clock
         self.sleep = sleep
         self.tick = tick
@@ -84,6 +90,13 @@ class Engine:
         self._thread.start()
         ready.wait(10)
         self.call(self.resume_running(), timeout=30)
+        asyncio.run_coroutine_threadsafe(self._sync_quietly(), self._loop)
+
+    async def _sync_quietly(self) -> None:
+        try:
+            await self.sync_replies()
+        except Exception:
+            log.exception("Дочитка ответов при запуске")
 
     def call(self, coroutine, timeout: float = 90):
         """Run a coroutine on the engine loop from another thread and wait for the result."""
@@ -227,6 +240,20 @@ class Engine:
                 async with lock:
                     if not self._campaign_active(campaign_id):
                         return
+                    # Everything is read again after the lock: another campaign may have written to this
+                    # organization or used the pause, a reply or a stop-list entry may have come (E-M-08/09/11).
+                    recipient = self.store.row("SELECT * FROM recipients WHERE id=?", (recipient["id"],))
+                    account = self.store.row("SELECT * FROM accounts WHERE id=?", (account_id,))
+                    campaign = self.store.row("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
+                    if not recipient or not account or recipient["status"] not in ("queued", "sending"):
+                        continue
+                    if recipient["status"] == "queued":
+                        verdict = self.precheck(campaign, account, recipient)
+                        if verdict:
+                            self._close_recipient(recipient["id"], *verdict)
+                            continue
+                    if self.earliest_send(account, recipient) > self.clock():
+                        continue
                     await self._ensure_connected(account_id)
                     await self.send_one(campaign, account, recipient)
                 network_failures = 0
@@ -268,21 +295,13 @@ class Engine:
                 return "skipped", "stoplist", "Аккаунт в стоп-листе"
             if self.store.value("SELECT 1 FROM unreachable WHERE target=?", (f"username:{username}",)):
                 return "unreachable", "known_unreachable", "Ранее недоступен, повторов нет"
-            # A repeat of a batch (reminder or another text) writes again on purpose, but once per
-            # repeat campaign; any other campaign never writes twice to the same organization.
-            repeat = bool(campaign.get("parent_id"))
-            already = self.store.value(
-                "SELECT 1 FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
-                "WHERE c.kind='normal' AND r.status='sent' AND r.id<>? AND "
-                "(r.business_id=? OR (r.username IS NOT NULL AND r.username=?)) "
-                + ("AND r.campaign_id=? " if repeat else "") + "LIMIT 1",
-                (recipient["id"], recipient["business_id"], username, *((campaign["id"],) if repeat else ())))
-            if not already and repeat and self.store.value(
-                    "SELECT 1 FROM batch_exclusions WHERE batch_id=? AND business_id=?",
-                    (campaign.get("batch_id") or campaign["parent_id"], recipient["business_id"])):
-                return "skipped", "excluded", "Убран из пачки"
-            if already:
-                return "skipped", "already_sent", "Этой организации уже писали"
+            verdict = self.send_guard(campaign, recipient, self.store.value)
+            if verdict:
+                return verdict
+            if campaign.get("parent_id"):
+                verdict = self._repeat_still_wanted(campaign, recipient)
+                if verdict:
+                    return verdict
         if account["is_test"] and username not in self.test_recipients():
             if not self.store.value("SELECT 1 FROM events WHERE kind='test_guard' AND campaign_id=?", (campaign["id"],)):
                 self.store.event("test_guard", "Тестовый аккаунт может писать только тестовым адресатам",
@@ -290,6 +309,57 @@ class Engine:
             return "skipped", "test_guard", "Тестовый аккаунт пишет только тестовым адресатам"
         if not username:
             return "skipped", "no_contact", "Нет username Telegram"
+        return None
+
+    def send_guard(self, campaign: dict, recipient: dict, value) -> tuple[str, str, str] | None:
+        """Rules that must hold at the very moment of sending; `value(sql, args)` reads either the store
+        or the open transaction that marks the message «sending».
+
+        - An ordinary campaign: one first message per organization, counting messages being sent right
+          now by another campaign (E-M-08).
+        - A repeat of a batch: only to those who really got the message it repeats (E-M-13), and each
+          stage (reminder, repeat) at most once per organization in the batch (E-M-10)."""
+        if campaign["kind"] != "normal":
+            return None
+        username = (recipient["username"] or "").casefold()
+        if not campaign.get("parent_id"):
+            if value("SELECT 1 FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
+                     "WHERE c.kind='normal' AND r.status IN ('sent','sending') AND r.id<>? AND "
+                     "(r.business_id=? OR (r.username IS NOT NULL AND r.username=?)) LIMIT 1",
+                     (recipient["id"], recipient["business_id"], username)):
+                return "skipped", "already_sent", "Этой организации уже писали"
+            return None
+        got = ("sent",) if campaign["mode"] == "live" else ("sent", "dry_sent")
+        if not value(f"SELECT 1 FROM recipients WHERE campaign_id=? AND business_id=? AND status IN "
+                     f"({','.join('?' * len(got))}) LIMIT 1", (campaign["parent_id"], recipient["business_id"], *got)):
+            return "skipped", "no_first", "Предыдущее сообщение пачки не получал"
+        batch_id = campaign.get("batch_id") or campaign["parent_id"]
+        if value("SELECT 1 FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
+                 "WHERE COALESCE(c.batch_id,c.id)=? AND c.stage=? AND r.status IN ('sent','sending') "
+                 "AND r.id<>? AND r.business_id=? LIMIT 1",
+                 (batch_id, campaign.get("stage") or "first", recipient["id"], recipient["business_id"])):
+            return "skipped", "already_sent", ("Напоминание этой организации уже отправлено"
+                                               if campaign.get("stage") == "reminder"
+                                               else "Этот этап пачки организация уже получила")
+        return None
+
+    def _repeat_still_wanted(self, campaign: dict, recipient: dict) -> tuple[str, str, str] | None:
+        """Read before every repeat message, not only when the repeat was created (E-M-11)."""
+        batch_id = campaign.get("batch_id") or campaign["parent_id"]
+        if self.store.value("SELECT 1 FROM batch_exclusions WHERE batch_id=? AND business_id=?",
+                            (batch_id, recipient["business_id"])):
+            return "skipped", "excluded", "Убран из пачки"
+        if self.store.value("SELECT 1 FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
+                            "WHERE COALESCE(c.batch_id,c.id)=? AND r.business_id=? AND r.replied_at IS NOT NULL "
+                            "LIMIT 1", (batch_id, recipient["business_id"])):
+            return "skipped", "replied", "Ответил в Telegram"
+        status = ""
+        try:
+            status = self.lead_status(recipient["business_id"]) or ""
+        except Exception:
+            log.exception("Статус лида для повтора")
+        if status in REPEAT_SKIP_STATUSES:
+            return "skipped", "lead_status", f"В «Лидах»: {REPEAT_SKIP_STATUSES[status]}"
         return None
 
     def earliest_send(self, account: dict, recipient: dict, *, now: datetime | None = None,
@@ -316,15 +386,22 @@ class Engine:
                 "AND started_at>=? ORDER BY started_at", (account["id"], iso(now - timedelta(hours=1))))]
         if len(last_hour) >= policy.hourly_cap:
             candidates.append(last_hour[-policy.hourly_cap] + timedelta(hours=1))
-        if recipient.get("status") != "sending":
+        # Test recipients are the owner's accounts: Moscow window, like everyone (E-M-04). «Без ожидания»
+        # (test campaigns only) skips the window and the pause between messages, never the limits.
+        no_wait = recipient.get("no_wait")
+        if no_wait is None and recipient.get("campaign_id"):
+            no_wait = self.store.value("SELECT no_wait FROM campaigns WHERE id=? AND kind='test'",
+                                       (recipient["campaign_id"],))
+        if recipient.get("status") != "sending" and not no_wait:
             pause_until = self.store.setting(f"next_send:{account['id']}")
             if last_send is not None:
                 candidates.append(last_send)
             elif pause_until:
                 candidates.append(parse(pause_until))
         due = max(candidates)
-        # Test campaigns go to the owner's own accounts: no recipient window (tz is empty).
-        return policy.next_window_start(due, recipient["tz"]) if recipient["tz"] else due
+        if no_wait:
+            return due
+        return policy.next_window_start(due, recipient["tz"] or DEFAULT_TZ)
 
     # ------------------------------------------------------------------ send
     async def _ensure_connected(self, account_id: int) -> None:
@@ -359,6 +436,56 @@ class Engine:
         session = self.gateway.export_session(account_id)
         if session:
             self.save_session(account_id, session)
+        await self.catch_up(account_id)
+
+    async def catch_up(self, account_id: int) -> int:
+        """Replies and «СТОП» that came while the app was closed (E-M-14): read the dialogs with everyone
+        this account wrote to and pass new incoming messages through the usual handler. Returns how many
+        dialogs had something new. Errors never stop sending: the next connection tries again."""
+        since = iso(self.clock() - timedelta(days=CATCH_UP_DAYS))
+        rows = self.store.rows(
+            "SELECT r.telegram_user_id AS uid, MIN(r.msg_id) AS first_id, p.access_hash "
+            "FROM recipients r JOIN peers p ON p.account_id=r.account_id AND p.telegram_user_id=r.telegram_user_id "
+            "WHERE r.account_id=? AND r.status='sent' AND r.msg_id IS NOT NULL AND r.sent_at>=? "
+            "GROUP BY r.telegram_user_id", (account_id, since))
+        found = 0
+        for row in rows:
+            key = f"seen_in:{account_id}:{row['uid']}"
+            after = max(int(row["first_id"] or 0), int(self.store.setting(key, 0) or 0))
+            try:
+                messages = await self.gateway.incoming_after(
+                    account_id, Peer(int(row["uid"]), int(row["access_hash"] or 0)), after)
+            except GatewayError as error:
+                log.warning("Входящие не дочитаны: %s", error.kind)
+                return found
+            if not messages:
+                continue
+            found += 1
+            self.store.set_setting(key, max(msg_id for msg_id, _text in messages))
+            await self.on_incoming(account_id, int(row["uid"]), "\n".join(text for _id, text in messages))
+        if found:
+            self.store.event("catch_up", f"Дочитаны ответы, пришедшие без приложения: {found}",
+                             account_id=account_id)
+        return found
+
+    async def sync_replies(self) -> int:
+        """At start: connect every ready account that has written to someone, which also reads missed replies.
+        Connected clients then keep receiving replies while the app is open, even with no campaign."""
+        if self.store.setting("emergency_stop", False):
+            return 0
+        since = iso(self.clock() - timedelta(days=CATCH_UP_DAYS))
+        ids = [row["id"] for row in self.store.rows(
+            "SELECT DISTINCT a.id FROM accounts a JOIN recipients r ON r.account_id=a.id "
+            "WHERE a.status IN ('active','paused') AND r.status='sent' AND r.sent_at>=?", (since,))]
+        for account_id in ids:
+            if account_id in self._connected:
+                await self.catch_up(account_id)
+                continue
+            try:
+                await self._ensure_connected(account_id)
+            except (_NetworkTrouble, _AccountStopped, _Retry):
+                continue
+        return len(ids)
 
     async def _peer(self, campaign: dict, account: dict, recipient: dict) -> Peer:
         username = recipient["username"]
@@ -402,6 +529,14 @@ class Engine:
                 self.store.event("reconciled", "Сообщение уже было доставлено, повтор не отправлен",
                                  account_id=account_id, campaign_id=campaign["id"], recipient_id=recipient["id"])
                 return
+            # Not delivered: the stop-list and the other checks apply again before a new try (E-M-07).
+            verdict = self.precheck(campaign, account, recipient)
+            if verdict:
+                with self.store.tx() as conn:
+                    conn.execute("UPDATE attempts SET status='failed',error_kind=?,error_detail=?,finished_at=? "
+                                 "WHERE id=?", (verdict[1], verdict[2], iso(self.clock()), attempt["id"]))
+                self._close_recipient(recipient["id"], *verdict)
+                return
             random_id = attempt["random_id"]
             attempt_id = attempt["id"]
         else:
@@ -409,6 +544,13 @@ class Engine:
             with self.store.tx() as conn:
                 state = conn.execute("SELECT status FROM recipients WHERE id=?", (recipient["id"],)).fetchone()
                 if not state or state["status"] != "queued":
+                    return
+                # Same transaction that claims the message: two campaigns can never both pass (E-M-08).
+                verdict = self.send_guard(campaign, recipient,
+                                          lambda sql, args: (conn.execute(sql, args).fetchone() or [None])[0])
+                if verdict:
+                    conn.execute("UPDATE recipients SET status=?,reason_kind=?,reason=? WHERE id=?",
+                                 (*verdict, recipient["id"]))
                     return
                 attempt_id = conn.execute(
                     "INSERT INTO attempts (recipient_id,account_id,random_id,mode,status,started_at) "

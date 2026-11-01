@@ -7,6 +7,7 @@ import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from .entities import parse as parse_entities
 from .gateway import (AUTH_CODE_INVALID, NOT_FOUND, NOT_USER, GatewayError, IncomingHandler,
                       LoginStep, Peer, SentMessage, TelegramGateway)
 
@@ -19,6 +20,8 @@ class Delivered:
     random_id: int
     msg_id: int
     date: datetime
+    raw: str = ""                 # text as the engine passed it (with [слова](url) markup)
+    entities: tuple = ()          # what Telegram would get: clickable links
 
 
 @dataclass
@@ -36,6 +39,7 @@ class FakeGateway(TelegramGateway):
     login_code: str = "12345"
     login_password: str = ""
     calls: list[tuple] = field(default_factory=list)
+    inbox: list[tuple[int, int, int, str]] = field(default_factory=list)  # (account, from user, msg id, text)
 
     def __post_init__(self):
         self._ids = itertools.count(1000)
@@ -63,8 +67,18 @@ class FakeGateway(TelegramGateway):
                 raise queue.pop(0)
 
     async def reply(self, account_id: int, from_user_id: int, text: str) -> None:
+        self.inbox.append((account_id, from_user_id, next(self._ids), text))
         if self._handler:
             await self._handler(account_id, from_user_id, text)
+
+    def reply_while_closed(self, account_id: int, from_user_id: int, text: str) -> None:
+        """A reply that arrives while nobody listens: only reading the dialog finds it."""
+        self.inbox.append((account_id, from_user_id, next(self._ids), text))
+
+    async def incoming_after(self, account_id, peer, after_msg_id):
+        self.calls.append(("incoming", account_id, peer.user_id))
+        return [(msg_id, text) for account, user, msg_id, text in self.inbox
+                if account == account_id and user == peer.user_id and msg_id > after_msg_id]
 
     def sent_to(self, user_id: int) -> list[Delivered]:
         return [item for item in self.delivered if item.user_id == user_id]
@@ -129,7 +143,8 @@ class FakeGateway(TelegramGateway):
                          if item.account_id == account_id and item.random_id == random_id), None)
         if existing:
             raise GatewayError("duplicate", "RANDOM_ID_DUPLICATE")
-        item = Delivered(account_id, peer.user_id, text, random_id, next(self._ids), self._now())
+        plain, entities = parse_entities(text)
+        item = Delivered(account_id, peer.user_id, plain, random_id, next(self._ids), self._now(), text, tuple(entities))
         self.delivered.append(item)
         if self.crash_after_delivery and len(self.delivered) == self.crash_after_delivery:
             self.crash_after_delivery = None
@@ -145,7 +160,7 @@ class FakeGateway(TelegramGateway):
             return None
         for item in reversed(self.delivered):
             if item.account_id == account_id and item.user_id == peer.user_id \
-                    and item.text == text and item.date >= since:
+                    and item.raw == text and item.date >= since:
                 return item.msg_id
         return None
 

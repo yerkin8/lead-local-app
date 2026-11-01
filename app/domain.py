@@ -102,3 +102,22 @@ def render_template(body: str, business: dict) -> str:
         }.get(business.get("site_type"), "сайт"),
     }
     return re.sub(r"\{(название|ниша|город|тип_сайта)\}", lambda m: str(values[m.group(1)]), body)
+
+
+_MD_LINK = re.compile(r"\[([^\[\]\n]{1,200})\]\((?:https?://)[^\s()]+\)")
+_URL_BODY = r"(?:https?://|www\.|t\.me/)[^\s<>()«»\"']*[^\s<>()«»\"'.,;:!?…]"
+_URL_IN_BRACKETS = re.compile(r"[ \t]*\([ \t]*" + _URL_BODY + r"[ \t]*\)", re.I)
+_URL = re.compile(r"[ \t]*" + _URL_BODY, re.I)
+
+
+def strip_links(text: str) -> str:
+    """Outgoing messages carry no links: Telegram shows links from people outside the recipient's contacts
+    as plain text (anti-scam, recipient side), so a link only looks like spam. «[слова](url)» keeps the words."""
+    text = _MD_LINK.sub(lambda m: m.group(1), str(text or ""))
+    text = _URL_IN_BRACKETS.sub("", text)
+    text = _URL.sub("", text)
+    text = re.sub(r":[ \t]*(?=[,.;!?\n]|$)", "", text)   # «Пример:» with nothing after it
+    text = re.sub(r"[ \t]+([,.;:!?])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()

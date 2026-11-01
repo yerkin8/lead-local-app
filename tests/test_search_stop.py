@@ -40,7 +40,9 @@ class SearchStopTests(unittest.TestCase):
         self.assertTrue(self.r["two_pass_cards_before_details"])
         self.assertEqual(self.r["two_pass_review_pages"], 3)          # one page per card
         self.assertEqual(self.r["two_pass_reviews"], [3, 3, 3])
-        self.assertEqual(self.r["two_pass_photo_count"], 1)
+        self.assertEqual(self.r["two_pass_photo_count"], 7)       # from the card JSON
+        self.assertEqual(self.r["two_pass_gallery_pages"], 0)      # no gallery request (E-S-08)
+        self.assertEqual(self.r["two_pass_review_field"], 3)       # reviewCount, not 9 ratings (E-S-07)
         self.assertEqual(self.r["two_pass_progress_phase"], "details")
         self.assertIn("card_page", self.r["two_pass_timing_stages"])
         self.assertIn("reviews", self.r["two_pass_timing_stages"])
@@ -95,3 +97,26 @@ class ReviewExtractionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SearchRobustnessTests(unittest.TestCase):
+    """REVIEW.md E-S-11…E-S-13 on synthetic pages (same child process script as above)."""
+    setUpClass = classmethod(SearchStopTests.setUpClass.__func__)
+
+    def test_one_failed_card_is_skipped(self):
+        self.assertEqual(self.r["one_bad_status"], "done")
+        self.assertEqual(self.r["one_bad_saved"], 3)
+        self.assertEqual(self.r["one_bad_errors"], 1)
+
+    def test_no_connection_is_interrupted_not_done(self):
+        self.assertEqual(self.r["no_net_status"], "interrupted")
+        self.assertEqual(self.r["no_net_run_status"], "stopped")
+
+    def test_reviews_cut_by_captcha_come_on_the_next_run(self):
+        self.assertEqual(self.r["captcha_first_status"], "blocked")
+        self.assertEqual(self.r["captcha_first_reviews"], [0, 0, 0])
+        self.assertEqual(self.r["captcha_second_status"], "done")
+        self.assertEqual(self.r["captcha_second_reviews"], [3, 3, 3])
+
+    def test_city_typo_gets_a_hint(self):
+        self.assertIn("проверьте написание города", self.r["typo_reason"])

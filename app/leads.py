@@ -104,8 +104,10 @@ def _row(conn, item: dict) -> dict:
     socials = item.pop("socials_json") or "[]"
     phones = item.pop("phones_json") or "[]"
     import json
-    contacts = outreach.contacts({"socials": json.loads(socials), "phones": json.loads(phones)},
-                                 outreach._dead(conn, item["id"]))
+    merged = {"id": item["id"], "socials": json.loads(socials), "phones": json.loads(phones)}
+    db._merge_manual_contacts(conn, merged)   # the owner's own numbers and links count too
+    phones = json.dumps(merged["phones"])
+    contacts = outreach.contacts(merged, outreach._dead(conn, item["id"]))
     item["contact"] = contacts[0]["contact"] if contacts else ""
     item["channel"] = contacts[0]["channel"] if contacts else ""
     item["has_phone"] = bool(json.loads(phones))
@@ -141,7 +143,9 @@ def filters(path: Path = DB_PATH) -> dict:
 
 
 def _text(business: dict, stage: str, path: Path) -> tuple[str, str]:
-    return outreach.script_for(business, stage, path)
+    from .domain import strip_links
+    slug, text = outreach.script_for(business, stage, path)
+    return slug, strip_links(text)   # the card shows exactly what will go: without links
 
 
 def _stage(conn, business_id: str) -> str:

@@ -25,7 +25,21 @@ DETAILS_SCHEMA_VERSION = 1
 # 7: Desktop LeadEqualMoney with the Mini App mechanics (same tables as 6; the number guarantees a backup
 #    for desktop bases that already carry a different «4» from an old branch); 6: script categories;
 #    5: templates.origin; 4: «Сегодня».
-DESKTOP_SCHEMA_VERSION = 7
+DESKTOP_SCHEMA_VERSION = 8
+# 8: manual_contacts — numbers and links the owner adds to a lead (kept apart from parser data, so
+#    «Обновить с Яндекс.Карт» never erases them). The number makes the pre-migration backup run once.
+MANUAL_CONTACTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS manual_contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('phone','link')),
+    value TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(business_id, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_manual_contacts_business ON manual_contacts(business_id);
+"""
 
 
 class SchemaTooNew(RuntimeError):
@@ -397,6 +411,7 @@ def init_desktop_db(path: Path = DB_PATH) -> None:
         db.executescript(OUTREACH_SCHEMA)
         from .leads import HIDDEN
         db.execute(HIDDEN)
+        db.executescript(MANUAL_CONTACTS_SCHEMA)
         db.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?,?)", (DESKTOP_SCHEMA_VERSION, timestamp))
         # Idempotent host migration. _backup_before_migration() ran before this transaction.
         for row in db.execute("SELECT id,map_url FROM businesses"):
@@ -664,6 +679,13 @@ def claim_job(path: Path = DB_PATH) -> dict | None:
         return item
 
 
+def list_jobs_of_kind(kind: str, limit: int = 20, path: Path = DB_PATH) -> list[dict]:
+    with connection(path) as conn:
+        rows = conn.execute("SELECT * FROM jobs WHERE kind=? ORDER BY created_at DESC LIMIT ?",
+                            (kind, int(limit))).fetchall()
+    return [decode_job(row) for row in rows]
+
+
 def stop_queued_job(job_id: str, path: Path = DB_PATH) -> bool:
     """Stop a job that has not started yet; False when it is already running or finished."""
     with connection(path) as conn:
@@ -831,18 +853,33 @@ def incomplete_job_review_items(job_id: str, review_limit: int,
         return [dict(row) for row in rows]
 
 
-def job_detail_items(job_id: str, review_limit: int, path: Path = DB_PATH) -> list[dict]:
-    """Cards of a search job that still lack a photo count or reviews (search pass 2)."""
+def job_detail_items(job_id: str, review_limit: int, search_key: str | None = None,
+                     path: Path = DB_PATH) -> list[dict]:
+    """Cards that still lack reviews: those of this search job and, with ``search_key``, cards saved by
+    earlier runs of the same search (their reviews may have been cut by a captcha or an error)."""
     cap = min(100, max(0, int(review_limit)))
+    if not cap:
+        return []
     with connection(path) as conn:
         rows = conn.execute("""SELECT b.id,b.map_url,d.photo_count,
-                (? > 0 AND COALESCE(d.reviews_complete,0)=0 AND COALESCE(b.reviews,1) > 0
+                (COALESCE(d.reviews_complete,0)=0 AND COALESCE(b.reviews,1) > 0
                  AND (SELECT COUNT(*) FROM reviews r WHERE r.business_id=b.id)
                      < MIN(?, COALESCE(NULLIF(b.reviews,0), ?))) AS needs_reviews
-            FROM job_results jr JOIN businesses b ON b.id=jr.business_id
+            FROM (SELECT business_id, 0 AS earlier, rowid AS n FROM job_results WHERE job_id=?
+                  UNION ALL
+                  SELECT business_id, 1 AS earlier, rowid AS n FROM search_seen WHERE search_key=?
+                    AND business_id NOT IN (SELECT business_id FROM job_results WHERE job_id=?)) ids
+            JOIN businesses b ON b.id=ids.business_id
             LEFT JOIN business_details d ON d.business_id=b.id
-            WHERE jr.job_id=? ORDER BY jr.rowid""", (cap, cap, cap, job_id)).fetchall()
-    return [dict(row) for row in rows if row["photo_count"] is None or row["needs_reviews"]]
+            ORDER BY ids.earlier, ids.n""", (cap, cap, job_id, search_key or "", job_id)).fetchall()
+    return [dict(row) for row in rows if row["needs_reviews"]]
+
+
+def set_business_phones(business_id: str, phones: list[str], path: Path = DB_PATH) -> None:
+    """Only the phone list (another card fetch found more numbers); CRM fields stay untouched."""
+    with connection(path) as conn:
+        conn.execute("UPDATE businesses SET phones=?,updated_at=? WHERE id=?",
+                     (json.dumps(list(phones), ensure_ascii=False), now(), business_id))
 
 
 def set_business_photo_count(business_id: str, count: int, path: Path = DB_PATH) -> None:
@@ -1089,6 +1126,7 @@ def business(business_id: str, path: Path = DB_PATH) -> dict | None:
         result["map_url"] = normalize_yandex_url(result["map_url"])
         result["phones"] = json.loads(result["phones"])
         result["socials"] = json.loads(result["socials"])
+        _merge_manual_contacts(db, result)
         suppression = db.execute("SELECT reason FROM suppressions WHERE business_id=?", (business_id,)).fetchone()
         result["do_not_contact"] = bool(suppression)
         result["suppression_reason"] = suppression["reason"] if suppression else ""
@@ -1102,6 +1140,93 @@ def business(business_id: str, path: Path = DB_PATH) -> dict | None:
         result["history"] = [dict(e) for e in db.execute(
             "SELECT old_status,new_status,changed_at FROM status_events WHERE business_id=? ORDER BY id DESC", (business_id,))]
         return result
+
+
+def _merge_manual_contacts(conn, result: dict) -> None:
+    """Numbers and links the owner added are shown with the parser data and take part in «Написать в
+    Telegram» and in mailings; ``parser_phones`` keeps what the card itself had."""
+    try:
+        rows = [dict(row) for row in conn.execute(
+            "SELECT id,kind,value,label,created_at FROM manual_contacts WHERE business_id=? ORDER BY id",
+            (result["id"],))]
+    except sqlite3.OperationalError:   # server mode: no desktop tables
+        rows = []
+    result["manual_contacts"] = rows
+    result["parser_phones"] = list(result["phones"])
+    if not rows:
+        return
+    from .phone_links import merge_phones
+    result["phones"] = merge_phones(result["phones"], [row["value"] for row in rows if row["kind"] == "phone"])
+    known = {str(item.get("url") if isinstance(item, dict) else item).rstrip("/").casefold()
+             for item in result["socials"]}
+    for row in rows:
+        if row["kind"] == "link" and row["value"].rstrip("/").casefold() not in known:
+            result["socials"].append({"label": row["label"] or host_label(row["value"]), "url": row["value"],
+                                      "manual": True})
+
+
+def host_label(url: str) -> str:
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").removeprefix("www.")
+    return {"t.me": "Telegram", "wa.me": "WhatsApp", "vk.com": "ВКонтакте"}.get(host, host or url)
+
+
+def normalize_manual_link(value: str) -> str:
+    """'@name' / 't.me/name' → https://t.me/name; a bare domain gets https://."""
+    import re as _re
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Вставьте ссылку")
+    if text.startswith("@") and _re.fullmatch(r"@[A-Za-z][A-Za-z0-9_]{3,31}", text):
+        return "https://t.me/" + text[1:]
+    if "://" not in text:
+        text = "https://" + text
+    from urllib.parse import urlparse
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or "." not in parsed.hostname:
+        raise ValueError("Это не похоже на ссылку. Пример: t.me/name, vk.com/name, сайт.рф")
+    return text
+
+
+def add_manual_contact(business_id: str, kind: str, value: str, label: str = "",
+                       path: Path = DB_PATH) -> dict:
+    if kind == "phone":
+        import phonenumbers
+        text = str(value or "").strip()
+        try:
+            parsed = phonenumbers.parse(text, "RU")
+        except phonenumbers.NumberParseException:
+            parsed = None
+        if parsed is None or not phonenumbers.is_possible_number(parsed):
+            raise ValueError("Номер не распознан. Пример: +7 900 123-45-67")
+        value = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+    elif kind == "link":
+        value = normalize_manual_link(value)
+    else:
+        raise ValueError("Неизвестный тип контакта")
+    with connection(path) as conn:
+        if not conn.execute("SELECT 1 FROM businesses WHERE id=?", (business_id,)).fetchone():
+            raise ValueError("Организация не найдена")
+        conn.execute("INSERT OR IGNORE INTO manual_contacts (business_id,kind,value,label,created_at) "
+                     "VALUES (?,?,?,?,?)", (business_id, kind, value, str(label or "")[:80], now()))
+        conn.execute("UPDATE businesses SET updated_at=? WHERE id=?", (now(), business_id))
+    return {"kind": kind, "value": value}
+
+
+def delete_manual_contact(contact_id: int, path: Path = DB_PATH) -> bool:
+    with connection(path) as conn:
+        row = conn.execute("SELECT business_id FROM manual_contacts WHERE id=?", (int(contact_id),)).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM manual_contacts WHERE id=?", (int(contact_id),))
+        conn.execute("UPDATE businesses SET updated_at=? WHERE id=?", (now(), row[0]))
+    return True
+
+
+def business_phones_raw(business_id: str, path: Path = DB_PATH) -> list[str]:
+    with connection(path) as conn:
+        row = conn.execute("SELECT phones FROM businesses WHERE id=?", (business_id,)).fetchone()
+    return json.loads(row[0]) if row else []
 
 
 def business_full(business_id: str, path: Path = DB_PATH) -> dict | None:

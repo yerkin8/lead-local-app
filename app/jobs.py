@@ -10,14 +10,14 @@ from .config import DB_PATH, MEDIA_DIR
 from .errors import YandexBlocked
 
 log = logging.getLogger(__name__)
-KINDS = ("search", "images", "products")
+KINDS = ("search", "images", "products", "cards")
 
 
 def recover_interrupted(path: Path = DB_PATH) -> None:
     """Requeue work cut off by a restart. An interrupted send is never repeated automatically."""
     with db.connection(path) as conn:
         conn.execute("UPDATE jobs SET status='queued',updated_at=? WHERE status='running' "
-                     "AND kind IN ('search','images','products')", (db.now(),))
+                     "AND kind IN ('search','images','products','cards')", (db.now(),))
         conn.execute("UPDATE parse_runs SET status='queued',ended_at=NULL WHERE status='running'")
         conn.execute("""UPDATE campaigns SET status='interrupted',
             error='Приложение закрылось во время рассылки; проверьте результат вручную',updated_at=?
@@ -31,7 +31,8 @@ def _runners() -> dict:
     from .desktop_gallery import run_gallery_images
     from .lead_parser import run_search
     from .media import run_products
-    return {"search": run_search, "images": run_gallery_images, "products": run_products}
+    from .cards import run_cards
+    return {"search": run_search, "images": run_gallery_images, "products": run_products, "cards": run_cards}
 
 
 def package_gallery(job_id: str, result: dict) -> dict:
@@ -59,7 +60,7 @@ def run_job(item: dict, *, package_archives: bool = False, runners: dict | None 
     finally:
         cancel.unbind()
     if run_id:
-        db.finish_parse_run(run_id, {"done": "done", "blocked": "stopped", "stopped": "stopped"}.get(status, "failed"))
+        db.finish_parse_run(run_id, {"done": "done", "blocked": "stopped", "stopped": "stopped", "interrupted": "stopped"}.get(status, "failed"))
     return status
 
 
@@ -76,7 +77,8 @@ def _run_bound(item: dict, kind: str, job_id: str, run_id: str | None, runners: 
         result = runners[kind](item)
         if kind == "images" and package_archives:
             result = package_gallery(job_id, result)
-        status = "blocked" if isinstance(result, dict) and result.get("blocked") else "done"
+        status = ("blocked" if isinstance(result, dict) and result.get("blocked")
+                  else "interrupted" if isinstance(result, dict) and result.get("interrupted") else "done")
         db.update_job(job_id, status=status, result=result)
     except cancel.Cancelled as exc:
         # Found cards stay in «Лиды»; the job shows how many were saved before the stop.

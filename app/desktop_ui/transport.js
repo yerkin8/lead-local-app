@@ -19,7 +19,7 @@
   };
   // Desktop-only methods: hidden in the web UI, and refused here as a safety net.
   const WEB_UNAVAILABLE = new Set(['open_logs', 'media_open', 'media_save', 'import_sqlite', 'replace_database', 'complete_setup',
-    'business_refresh', 'media_discover_sections']);
+    'business_refresh', 'media_discover_sections', 'lead_add', 'phones_refill', 'cards_job', 'cards_stop']);
   const AUTH_MESSAGES = {
     401: 'Откройте приложение через Telegram-бота',
     403: 'У этого Telegram-аккаунта нет доступа',

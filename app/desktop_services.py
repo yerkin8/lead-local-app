@@ -99,12 +99,58 @@ def start_desktop_search(payload: dict) -> dict:
     return {"jobs": jobs, "count": len(jobs)}
 
 
+def _review_limit() -> int:
+    try:
+        return min(100, max(0, int(db.desktop_setting("search_review_limit", "20"))))
+    except (TypeError, ValueError):
+        return 20
+
+
+def add_lead_by_link(url: str, niche: str = "", city: str = "") -> dict:
+    """«Добавить лида»: an existing lead opens at once; otherwise a background card job (status,
+    «Остановить») parses the card like the search. The site type is not filtered."""
+    from . import cards
+    url = str(url or "").strip()
+    if not url:
+        raise ValueError("Вставьте ссылку на организацию в Яндекс.Картах")
+    identity = cards.org_id_from_url(url)
+    if not identity and not cards.is_short_link(url):
+        raise ValueError("Это не ссылка на организацию Яндекс.Карт. Откройте карточку на картах и скопируйте "
+                         "адрес из строки браузера или кнопкой «Поделиться»")
+    if identity and db.business(identity):
+        return {"business_id": identity, "existed": True}
+    job_id = db.create_job("cards", {"mode": "add", "url": url, "niche": str(niche or "").strip()[:80],
+                                     "city": str(city or "").strip()[:80], "review_limit": _review_limit()})
+    return {"job_id": job_id, "existed": False}
+
+
+def refill_phones(ids: list | None = None) -> dict:
+    """«Дособрать номера»: one card request per lead with one number or without a mobile."""
+    from . import cards
+    targets = [str(x) for x in ids] if ids else cards.leads_missing_phones()
+    if not targets:
+        return {"job_id": None, "total": 0}
+    running = [item for item in db.list_jobs_of_kind("cards") if item["status"] in ("queued", "running")
+               and item["params"].get("mode") == "phones"]
+    if running:
+        return {"job_id": running[0]["id"], "total": len(running[0]["params"].get("ids") or []), "already": True}
+    job_id = db.create_job("cards", {"mode": "phones", "ids": targets})
+    return {"job_id": job_id, "total": len(targets)}
+
+
+def card_job(job_id: str) -> dict:
+    item = db.job(str(job_id))
+    if not item or item["kind"] != "cards":
+        raise ValueError("Задание не найдено")
+    return {key: item.get(key) for key in ("id", "status", "progress", "result", "error", "params")}
+
+
 def stop_job(job_id: str) -> dict:
     """A queued job stops at once; a running one is asked to stop and ends as «Остановлен»
     at the next check (between cards, inside pauses and the review pass)."""
     from . import cancel
     item = db.job(job_id)
-    if not item or item["kind"] != "search":
+    if not item or item["kind"] not in ("search", "cards"):
         raise ValueError("Задание не найдено")
     if db.stop_queued_job(job_id):
         cancel.forget(job_id)
@@ -128,11 +174,28 @@ def search_results(job_id: str) -> list[dict]:
 
 
 def refresh_business(business_id: str) -> dict:
-    from .lead_parser import make_driver, parse_org, collect_gallery_photo_count, collect_reviews_browser
+    """«Обновить с Яндекс.Карт»: the card by HTTP like the search (all phones, reviewCount, photos from
+    the card JSON); Chrome only when Yandex refuses the plain request. CRM fields, statuses and the
+    owner's own numbers and links (manual_contacts) are never touched."""
+    from . import cards
+    from .lead_parser import (SearchBlocked, collect_reviews_http, make_driver, parse_org,
+                              collect_gallery_photo_count, collect_reviews_browser)
 
     existing = db.business(business_id)
     if not existing:
         raise ValueError("Организация не найдена")
+    review_limit = _review_limit()
+    session = cards._session()
+    try:
+        data = cards.fetch_card(session, business_id)
+        db.refresh_business(data, store_details=True, review_limit=max(review_limit, 1))
+        if review_limit and int(data.get("reviews") or 0):
+            collect_reviews_http(session, data["review_url"], business_id, review_limit)
+        return db.business_full(business_id)
+    except SearchBlocked:
+        pass   # captcha for plain requests: try the browser below
+    finally:
+        session.close()
     driver = make_driver()
     try:
         data = parse_org(driver, existing["map_url"])
@@ -309,6 +372,13 @@ def backup_database() -> str:
     # closing(): `with sqlite3.connect()` only commits; an open handle keeps the file locked on Windows.
     with closing(sqlite3.connect(DB_PATH)) as source, closing(sqlite3.connect(target)) as dest:
         source.backup(dest)
+    # The mailing base holds the stop-list and the sending history: it goes into every manual backup.
+    mailing = DATA_DIR / "mailing" / "mailing.sqlite3"
+    if mailing.is_file() and mailing.stat().st_size:
+        mailing_target = target.with_name(target.stem + "-mailing.sqlite3")
+        with closing(sqlite3.connect(mailing.as_uri() + "?mode=ro", uri=True)) as source, \
+                closing(sqlite3.connect(mailing_target)) as dest:
+            source.backup(dest)
     return str(target)
 
 

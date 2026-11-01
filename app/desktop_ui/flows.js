@@ -9,7 +9,7 @@ mediaJob = function (job) {
     `<button class="btn" data-open-archive="${E(job.id)}" data-archive-name="${E(name)}">${E(name)} ↗</button>
      <button class="ghost" data-save-archive="${E(job.id)}" data-archive-name="${E(name)}">Сохранить копию</button>`
   ).join(''));
-  const retry = ['done', 'failed', 'blocked'].includes(job.status)
+  const retry = ['done', 'failed', 'blocked', 'interrupted'].includes(job.status)
     ? `<button class="ghost" data-repeat-job="${E(job.id)}">Повторить парсинг</button>` : '';
   const resume = job.kind === 'images' && ['failed', 'blocked'].includes(job.status)
     ? `<button class="btn" data-resume-job="${E(job.id)}">Продолжить с сохранённого</button>` : '';
@@ -31,7 +31,7 @@ const JOB_LABELS = { queued: 'В очереди', running: 'В работе', do
 jobBadge = function (job) {
   const stopping = job.status === 'running' && job.progress?.stopping;
   const label = stopping ? 'Останавливается…' : (JOB_LABELS[job.status] || job.status);
-  const tone = job.status === 'done' ? 'green' : ['failed', 'blocked'].includes(job.status) ? 'warn' : '';
+  const tone = job.status === 'done' ? 'green' : ['failed', 'blocked', 'interrupted'].includes(job.status) ? 'warn' : '';
   return `<span class="chip ${tone}">${E(label)}</span>`;
 };
 function searchStage(job) {
@@ -52,7 +52,7 @@ searchJob = function (j) {
     : j.error && j.status !== 'stopped' ? '' : r.reason || '';
   return `<div class="row" data-activity-kind="search" data-activity-id="${E(j.id)}"><div class="row-head"><div>
     <span class="row-title">${E(p.niche)} · ${E(p.city)}</span>
-    <div class="muted small">Цель ${E(p.count)} новых · отзывов ${E(p.review_limit ?? 20)} · ${E(LeadNav.localTime(j.created_at))}</div></div>
+    <div class="muted small">Цель ${E(p.count)} новых · отзывов ${E(p.review_limit ?? 20)}${Number(p.min_reviews) > 0 ? ` · от ${E(p.min_reviews)} отзывов` : ''} · ${E(LeadNav.localTime(j.created_at))}</div></div>
     <div class="row-actions">${jobBadge(j)}${stop}<button class="btn" data-search-results="${E(j.id)}">Результаты</button></div></div>
     <div class="chips"><span class="chip green">Новых ${E(r.matched ?? x.matched ?? 0)}</span><span class="chip">Уже в базе ${E(r.skipped_existing ?? x.skipped_existing ?? 0)}</span><span class="chip">Проверены ранее ${E(r.skipped_checked ?? x.skipped_checked ?? 0)}</span><span class="chip">Просмотрены ${E(r.scanned ?? x.scanned ?? 0)}</span><span class="chip">Ошибки ${E(r.errors ?? x.errors ?? 0)}</span></div>
     ${stage ? `<div class="inline-note">${stage}</div>` : ''}
@@ -76,7 +76,8 @@ const baseSearch = search;
 search = async function (node) {
   await baseSearch(node);
   node.querySelector('#search-form .form-grid')?.insertAdjacentHTML('beforeend',
-    `<label class="field">Отзывы на организацию<input name="review_limit" type="number" min="0" max="100" value="${E(state.prefs?.review_limit ?? 20)}"><small class="muted">0 отключает сбор; максимум 100 · по умолчанию из Настроек</small></label>`);
+    `<label class="field">Отзывы на организацию<input name="review_limit" type="number" min="0" max="100" value="${E(state.prefs?.review_limit ?? 20)}"><small class="muted">0 отключает сбор; максимум 100 · по умолчанию из Настроек</small></label>
+    <label class="field">Отзывов от<input name="min_reviews" type="number" min="0" max="10000000" step="1" inputmode="numeric" placeholder="Не важно"><small class="muted">Например, 100 — только бизнесы со 100 отзывами и больше</small></label>`);
 };
 
 const baseCall = call;
@@ -86,39 +87,6 @@ call = async function (method, ...args) {
   }
   return baseCall(method, ...args);
 };
-
-const baseDetail = detail;
-detail = async function (node) {
-  await baseDetail(node);
-  const business = await call('business', state.businessId);
-  const detail = business?.details || {};
-  const hours = business?.hours || [];
-  const features = business?.features || [];
-  const links = business?.links || [];
-  const reviews = business?.review_items || [];
-  const detailNode = node.querySelector('.detail-stack .panel .business-grid');
-  detailNode?.insertAdjacentHTML('afterend', `<section class="org-details-section" aria-label="Подробности карточки">
-    <div class="inline-note"><strong>Оценка:</strong> ${E(business.rating ?? '—')} · ${E(business.reviews ?? '—')} отзывов · <strong>Фото:</strong> ${E(detail.photo_count ?? 'нет данных')}</div>
-    ${detail.description ? `<p>${E(detail.description)}</p>` : ''}
-    ${detail.latitude != null && detail.longitude != null ? `<p class="small muted">Координаты: ${E(detail.latitude)}, ${E(detail.longitude)}</p>` : ''}
-    ${detail.categories?.length ? `<p class="small">Категории: ${detail.categories.map(E).join(' · ')}</p>` : ''}
-    ${hours.length ? `<h3>Часы работы</h3><div class="org-details-list">${hours.map(x => `<div><strong>${E(x.weekday)}</strong><span>${x.is_closed ? 'Закрыто' : `${E(x.opens || '—')}–${E(x.closes || '—')}`}</span></div>`).join('')}</div>` : ''}
-    ${features.length ? `<h3>Особенности</h3><div class="org-details-list">${features.map(x => `<div><strong>${E(x.name)}</strong><span>${E(x.value || '—')}</span></div>`).join('')}</div>` : ''}
-    ${links.length ? `<h3>Ссылки</h3><div class="org-details-list">${links.map(x => `<div><strong>${E(x.type)}</strong><a href="${E(x.url)}" target="_blank" rel="noopener noreferrer">${E(x.label || x.url)}</a></div>`).join('')}</div>` : ''}
-    <h3>Отзывы · сохранено ${reviews.length}</h3>
-    <p class="small muted">${detail.reviews_complete ? 'Запрошенный лимит достигнут или карточка пройдена.' : 'Сбор частичный и может продолжиться при повторном обновлении карточки.'}</p>
-    ${reviews.length ? `<div class="org-review-list">${reviews.map(x => `<article><div class="small muted">${E(x.review_date || 'Дата не указана')} · ${E(x.rating ?? 'без оценки')}</div><p>${E(x.text)}</p>${x.company_response ? `<div class="inline-note"><strong>Ответ организации:</strong> ${E(x.company_response)}</div>` : ''}</article>`).join('')}</div>` : '<p class="small muted">Подробные отзывы пока не сохранены.</p>'}
-  </section>`);
-  if (business.phones?.length) {
-    node.querySelector('.detail-stack .panel')?.insertAdjacentHTML('beforeend',
-      `<section class="inline-note" aria-labelledby="telegram-links-title"><div class="panel-head"><div><strong id="telegram-links-title">Проверить ТГ</strong>
-      <p>Сформировать ручные ссылки по телефонам карточки. Приложение не обращается к Telegram и не проверяет наличие аккаунта.</p></div></div>
-      <div class="toolbar"><button class="btn" data-show-telegram-links>Сформировать ссылки</button><button class="ghost" data-copy-all-telegram-links hidden>Копировать все</button></div>
-      <p class="small muted">Если номер не открывается в Telegram, это может означать и скрытую видимость номера у владельца, а не отсутствие аккаунта.</p>
-      <div class="list" data-telegram-link-list aria-live="polite" style="margin-top:10px"></div></section>`);
-  }
-};
-
 
 const baseMedia = media;
 media = async function (node) {
@@ -494,6 +462,7 @@ document.addEventListener('submit', event => {
       country: data.get('country'), city: data.get('city'), niche: data.get('niche'),
       count: Number(data.get('count')), types: data.getAll('types'),
       review_limit: Number(data.get('review_limit') || 0),
+      min_reviews: Number(data.get('min_reviews') || 0),
     });
     toast(`Создано запусков: ${result.count}`);
     render();

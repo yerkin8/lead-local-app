@@ -103,6 +103,7 @@
   }
   async function contactedPage(node) {
     const rows = await call('outreach_contacted');
+    window.todayQueueIds = rows.map((r) => r.id);   // «← Пред. / След. →» in the lead card opened from here
     node.innerHTML = segments(rows.length) + (rows.length
       ? `<section class="panel"><p class="muted small">Отмечайте, что ответили лиды. «Открыть чат» покажет переписку в Telegram.</p><div class="list">${rows.map(contactedRow).join('')}</div></section>`
       : `<section class="panel">${empty('Пока никому не писали', 'Здесь появятся лиды после отметки «Отправил».')}</section>`);
@@ -112,6 +113,7 @@
     setHeader('Сегодня', 'Кому написать сейчас');
     if (segment === 'contacted') { await contactedPage(node); return; }
     data = await call('outreach_today');
+    window.todayQueueIds = data.items.map((i) => i.business_id);
     const items = data.items.filter((i) => !skipped.has(i.business_id));
     if (!items.length && skipped.size) skipped = new Set();
     const list = items.length ? items : data.items;
@@ -236,10 +238,6 @@
     const node = document.querySelector('#content');
     if (state.view === 'settings') {
       try { await settingsBlock(node); } catch (_) { /* settings still usable */ }
-    }
-    if (state.view === 'detail' && state.businessId && !node.querySelector('[data-today-add]')) {
-      node.querySelector('.panel-head')?.insertAdjacentHTML('beforeend',
-        `<button type="button" class="btn" data-today-add="${E(state.businessId)}">В «Сегодня»</button>`);
     }
     return result;
   };

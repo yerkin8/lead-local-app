@@ -1233,3 +1233,12 @@ label.field > small { margin-top: -2px; font-weight: 400; font-size: 12px; line-
 .settings-page form.form-grid > label.field { flex: 1 1 240px; white-space: normal; }
 .settings-page form.form-grid > :is(div, .toolbar):has(> .btn) { flex: 0 0 auto; margin-top: 24px; }
 .sidebar-bottom small#data-dir { font-family: inherit; cursor: help; }
+
+/* One scrollbar (next2): on a wide window only .main scrolls and the document never does — a page part
+   that is taller than the window (sheets, toasts, the sticky sidebar) no longer adds a second bar.
+   Under 861px the sidebar goes on top and the document is the only scroller (.main is overflow: visible). */
+@media (min-width: 861px) {
+  html, body { height: 100%; overflow: hidden; }
+  body { min-height: 0; }
+  .main { height: 100%; }
+}

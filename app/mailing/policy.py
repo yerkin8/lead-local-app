@@ -45,6 +45,35 @@ def recipient_tz(city: str | None, country: str | None) -> str:
     return CITY_TZ.get(_key(city)) or COUNTRY_TZ.get(_key(country)) or DEFAULT_TZ
 
 
+def _dative(city: str) -> str:
+    """«Тюмень» → «Тюмени», «Москва» → «Москве», «Новосибирск» → «Новосибирску»; '' when unsure."""
+    word = str(city or "").strip()
+    if not word or " " in word or "-" in word or not word[0].isupper():
+        return ""
+    low = word[-1]
+    if low == "ь":
+        return word[:-1] + "и"
+    if low == "а":
+        return word[:-1] + ("и" if word[-2:-1] in "гкхжчшщ" else "е")
+    if low == "я":
+        return word[:-1] + "и"
+    if low in "бвгдзклмнпрстфхцчшщж":
+        return word + "у"
+    return ""
+
+
+def when_text(moment, tz_name: str | None, city: str | None = "") -> str:
+    """«02.11 10:00 по Тюмени (08:00 МСК)»; Moscow time alone when the recipient is in Moscow time."""
+    tz_name = tz_name or DEFAULT_TZ
+    local = moment.astimezone(zone(tz_name))
+    moscow = moment.astimezone(zone(DEFAULT_TZ))
+    if local.utcoffset() == moscow.utcoffset():
+        return moscow.strftime("%d.%m %H:%M") + " МСК"
+    place = _dative(city)
+    where = f"по {place}" if place else "по времени получателя"
+    return f"{local.strftime('%d.%m %H:%M')} {where} ({moscow.strftime('%H:%M')} МСК)"
+
+
 def zone(name: str):
     try:
         return ZoneInfo(name)

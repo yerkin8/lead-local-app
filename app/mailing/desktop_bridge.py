@@ -36,11 +36,11 @@ def create_service(data_dir: Path):
 class MailingBridgeMixin:
     _mailing = None
 
-    def _m(self, method: str, *args):
+    def _m(self, method: str, *args, **kwargs):
         try:
             if self._mailing is None:
                 raise RuntimeError("Модуль рассылки не запустился. Подробности в журнале приложения")
-            return {"ok": True, "data": getattr(self._mailing, method)(*args)}
+            return {"ok": True, "data": getattr(self._mailing, method)(*args, **kwargs)}
         except Exception as exc:  # message shown in the UI; never echo secrets
             return {"ok": False, "error": scrub(str(exc))[:500]}
 
@@ -95,7 +95,7 @@ class MailingBridgeMixin:
         data = dict(payload or {})
         return self._m("create_campaign", data.get("title", ""), dict(data.get("filters") or {}),
                        data.get("template", ""), list(data.get("accounts") or []), data.get("kind", "normal"),
-                       data.get("limit") or None)
+                       data.get("limit") or None, no_wait=bool(data.get("no_wait")))
 
     def mailing_message_set(self, campaign_id, recipient_id, text):
         return self._m("set_message", int(campaign_id), int(recipient_id), str(text or ""))
@@ -144,6 +144,16 @@ class MailingBridgeMixin:
     def mailing_policy_save(self, values):
         return self._m("save_policy", dict(values or {}))
 
+    # «Тесты» (next2): the owner's test recipients
+    def mailing_tests(self):
+        return self._m("test_recipients_list")
+
+    def mailing_test_add(self, value):
+        return self._m("test_recipient_add", str(value or ""))
+
+    def mailing_test_remove(self, index):
+        return self._m("test_recipient_remove", int(index))
+
     # batches and repeats (next/03)
     def mailing_exclude(self, campaign_id, business_id):
         return self._m("exclude", int(campaign_id), str(business_id))
@@ -151,8 +161,8 @@ class MailingBridgeMixin:
     def mailing_include(self, campaign_id, business_id):
         return self._m("include", int(campaign_id), str(business_id))
 
-    def mailing_repeat_preview(self, campaign_id):
-        return self._m("repeat_preview", int(campaign_id))
+    def mailing_repeat_preview(self, campaign_id, template="auto:reminder"):
+        return self._m("repeat_preview", int(campaign_id), str(template or "auto:reminder"))
 
     def mailing_repeat(self, payload):
         data = dict(payload or {})

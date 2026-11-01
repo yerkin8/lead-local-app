@@ -105,3 +105,46 @@ def build_telegram_phone_links(phones: object, region: str = "RU") -> list[dict[
         })
 
     return result
+
+
+def merge_phones(*groups: object, region: str = "RU") -> list[str]:
+    """All numbers of a card in order of appearance, each once (compared as E.164).
+
+    Groups go in priority order: what the card shows, then the page state JSON, then numbers taken from
+    WhatsApp/Viber links. Bare digits (``79991234567``) are shown in the international format."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in group if isinstance(group, (list, tuple)) else []:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            candidate = text
+            if re.fullmatch(r"\d{10,15}", text):
+                candidate = "+" + text if not (len(text) == 11 and text[0] == "8") else text
+            try:
+                parsed = phonenumbers.parse(candidate, region)
+            except NumberParseException:
+                parsed = None
+            key = _dedupe_key(candidate, parsed, region)
+            if key in seen:
+                continue
+            seen.add(key)
+            if parsed is not None and candidate is not text:
+                text = phonenumbers.format_number(parsed, PhoneNumberFormat.INTERNATIONAL)
+            result.append(text)
+    return result
+
+
+MESSENGER_PHONE = re.compile(
+    r"(?:wa\.me/|api\.whatsapp\.com/send/?\?phone=|whatsapp://send\?phone=|viber://(?:chat|add)\?number=)"
+    r"(?:%2B|\+)?(\d{10,15})", re.I)
+
+
+def messenger_phones(urls: object) -> list[str]:
+    """Digits of numbers in WhatsApp and Viber links (``wa.me/79991234567?text=…``)."""
+    found = []
+    for url in urls if isinstance(urls, (list, tuple, set)) else []:
+        for match in MESSENGER_PHONE.finditer(str(url or "")):
+            found.append(match.group(1))
+    return found

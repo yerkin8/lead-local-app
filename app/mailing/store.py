@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from .logsafe import scrub
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS accounts (
@@ -125,6 +126,55 @@ CREATE TABLE IF NOT EXISTS batch_exclusions (   -- «Убрать из пачк�
 """
 
 TERMINAL = ("sent", "dry_sent", "skipped", "unreachable", "failed")
+# Columns added after the first release (ALTER TABLE on open). Version 2: campaigns.no_wait (tests).
+ADDED_COLUMNS = {
+    "recipients": [("edited", "INTEGER NOT NULL DEFAULT 0")],   # text edited by the owner (redesign 02)
+    "campaigns": [("batch_id", "INTEGER"), ("parent_id", "INTEGER"),  # batches and repeats (next/03)
+                  ("stage", "TEXT NOT NULL DEFAULT 'first'"),
+                  ("no_wait", "INTEGER NOT NULL DEFAULT 0")],   # test campaign «Без ожидания» (next2)
+}
+
+
+class SchemaTooNew(RuntimeError):
+    """mailing.sqlite3 was written by a newer app."""
+
+
+def _stored_version(path: Path) -> int | None:
+    """None: no base yet; 0: base without a version; N: meta.schema_version."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return None
+    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "meta" not in tables:
+            return 0 if tables else None
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+def backup_file(path: Path, label: str) -> Path:
+    """Consistent copy of mailing.sqlite3 into <data>/backups (integrity checked)."""
+    folder = Path(path).parent.parent / "backups"
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    target = folder / f"mailing-{label}-{stamp}-{secrets.token_hex(4)}.sqlite3"
+    source = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, timeout=30)
+    destination = sqlite3.connect(target, timeout=30)
+    try:
+        source.backup(destination)
+        check = destination.execute("PRAGMA integrity_check").fetchone()
+        if not check or check[0] != "ok":
+            raise sqlite3.DatabaseError("Копия базы рассылки не прошла проверку целостности")
+    except BaseException:
+        destination.close()
+        source.close()
+        target.unlink(missing_ok=True)
+        raise
+    destination.close()
+    source.close()
+    return target
 
 
 def utcnow() -> datetime:
@@ -143,19 +193,33 @@ class Store:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        current = _stored_version(self.path)
+        if current is not None and current > SCHEMA_VERSION:
+            raise SchemaTooNew(
+                f"База рассылки создана более новой версией приложения (схема {current}, эта версия понимает "
+                f"до {SCHEMA_VERSION}). Обновите LeadEqualMoney, база не изменена.")
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            missing = self._missing_columns(conn)
+            if missing and current is not None:
+                # The stop-list lives here: never alter the file without a copy (F-O-07).
+                backup_file(self.path, f"pre-schema-v{SCHEMA_VERSION}")
             conn.executescript(SCHEMA)
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(recipients)")}
-            if "edited" not in columns:  # per-recipient text edited by the owner (redesign 02)
-                conn.execute("ALTER TABLE recipients ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
-            campaign_columns = {row[1] for row in conn.execute("PRAGMA table_info(campaigns)")}
-            # Batches and repeats (next/03): the first campaign of a batch is its root.
-            for name, ddl in (("batch_id", "INTEGER"), ("parent_id", "INTEGER"),
-                              ("stage", "TEXT NOT NULL DEFAULT 'first'")):
-                if name not in campaign_columns:
-                    conn.execute(f"ALTER TABLE campaigns ADD COLUMN {name} {ddl}")
-            conn.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+            for table, name, ddl in self._missing_columns(conn):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            conn.execute("INSERT INTO meta VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET "
+                         "value=excluded.value", (str(SCHEMA_VERSION),))
+
+    @staticmethod
+    def _missing_columns(conn) -> list[tuple[str, str, str]]:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        result = []
+        for table, columns in ADDED_COLUMNS.items():
+            if table not in tables:
+                continue
+            have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            result += [(table, name, ddl) for name, ddl in columns if name not in have]
+        return result
 
     @contextmanager
     def connect(self):

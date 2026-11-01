@@ -109,7 +109,7 @@ class DryRunTests(MailingCase):
         self.assertEqual(result["counts"]["sent"], 0)
         self.assertEqual(self.fake.delivered, [])
         self.assertEqual([c for c in self.fake.calls if c[0] in ("send", "resolve")], [])
-        self.assertTrue(all("Ушло бы" in r["reason"] for r in result["recipients"]))
+        self.assertTrue(all("Уйдёт" in r["reason"] for r in result["recipients"]))
         self.assertIn("Организация 1", result["recipients"][0]["message"])
         self.assertIn("СТОП", result["recipients"][0]["message"])
 

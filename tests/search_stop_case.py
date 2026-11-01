@@ -25,9 +25,12 @@ def search_page(count=CARDS):
 
 def card_page(identity, site=""):
     site_html = f"<a href='{site}'><span class='business-urls-view__text'>{site}</span></a>" if site else ""
+    state = json.dumps({"stack": [{"results": {"items": [{
+        "id": identity, "ratingData": {"ratingCount": 9, "reviewCount": 3}, "photos": {"count": 7}}]}}]})
     return (f"<h1 class='orgpage-header-view__header'>Кафе {identity}</h1>"
             "<a class='orgpage-header-view__address'>Казань, ул. Пушкина, 1</a>"
-            "<div class='business-header-rating-view__text'>3 отзыва</div>" + site_html)
+            "<div class='business-header-rating-view__text'>9 оценок</div>" + site_html +
+            f"<script type='application/json' class='state-view'>{state}</script>")
 
 
 REVIEWS = "".join(
@@ -38,9 +41,9 @@ REVIEWS = "".join(
     "</div></div>" % (i, i, i) for i in range(3))
 
 
-def new_job(count=5, review_limit=3, niche="кафе"):
+def new_job(count=5, review_limit=3, niche="кафе", city="Казань"):
     created = db.create_desktop_parse_jobs({"country": "Россия", "niche": niche, "count": count,
-                                            "types": ["no_site"], "review_limit": review_limit}, ["Казань"])
+                                            "types": ["no_site"], "review_limit": review_limit}, [city])
     return created[0]["id"]
 
 
@@ -120,6 +123,8 @@ out["two_pass_cards_before_details"] = cards_done < first_detail
 out["two_pass_review_pages"] = order.count("reviews")
 out["two_pass_reviews"] = [db.business_review_count(str(100 + i)) for i in range(3)]
 out["two_pass_photo_count"] = db.business_full("100")["details"]["photo_count"]
+out["two_pass_gallery_pages"] = order.count("gallery")
+out["two_pass_review_field"] = db.business("100")["reviews"]
 progress = db.job(two_pass)["progress"]
 out["two_pass_progress_phase"] = progress.get("phase")
 out["two_pass_timing_stages"] = sorted(db.job(two_pass)["result"].get("timing", {}))
@@ -192,4 +197,79 @@ with patch.object(lead_parser, "request_page", side_effect=fake_parallel), \
 out["parallel_seconds"] = round(time.monotonic() - started, 2)
 out["parallel_saved"] = db.job_result_count(parallel)
 out["threads_left"] = sum(1 for t in threading.enumerate() if t.name.startswith("LEM site check") and t.is_alive())
+
+# 8. One card answers 404: it is skipped and counted, the search goes on and ends «Готово» (E-S-11).
+one_bad = new_job(count=3, review_limit=0, niche="кафе семь")
+
+
+def fake_one_bad(_session, url):
+    if url.rstrip("/").endswith("/600"):
+        raise lead_parser.PageFailed("Яндекс.Карты вернули HTTP 404")
+    if "/maps/org/" in url:
+        return url, card_page(url.rstrip("/").split("/")[-1])
+    return url, search_page().replace("cafe/1", "cafe/6")
+
+
+with patch.object(lead_parser, "request_page", side_effect=fake_one_bad):
+    out["one_bad_status"] = run_job(claim(one_bad))
+out["one_bad_saved"] = db.job_result_count(one_bad)
+out["one_bad_errors"] = db.job(one_bad)["result"]["errors"]
+
+# 9. No connection: every card fails. The search is cut and is not «Готово».
+no_net = new_job(count=3, review_limit=0, niche="кафе восемь")
+
+
+def fake_no_net(_session, url):
+    if "/maps/org/" in url:
+        raise lead_parser.PageFailed("Не удалось загрузить Яндекс.Карты: ConnectionError")
+    return url, search_page().replace("cafe/1", "cafe/7")
+
+
+with patch.object(lead_parser, "request_page", side_effect=fake_no_net):
+    out["no_net_status"] = run_job(claim(no_net))
+out["no_net_run_status"] = run_status(no_net)
+
+# 10. A captcha during the review pass; the next run of the same search loads the missing reviews (E-S-12).
+first_run = new_job(count=3, review_limit=3, niche="кафе девять")
+
+
+def fake_review_captcha(_session, url):
+    if "/reviews/" in url:
+        raise lead_parser.SearchBlocked("Яндекс показал капчу")
+    if "/maps/org/" in url:
+        return url, card_page(url.rstrip("/").split("/")[-1])
+    return url, search_page(3).replace("cafe/1", "cafe/8")
+
+
+with patch.object(lead_parser, "request_page", side_effect=fake_review_captcha):
+    out["captcha_first_status"] = run_job(claim(first_run))
+out["captcha_first_reviews"] = [db.business_review_count(str(800 + i)) for i in range(3)]
+second_run = new_job(count=3, review_limit=3, niche="кафе девять")
+
+
+def fake_second(_session, url):
+    if "/reviews/" in url:
+        return url, REVIEWS
+    if "/maps/org/" in url:
+        return url, card_page(url.rstrip("/").split("/")[-1])
+    return url, search_page(3).replace("cafe/1", "cafe/8")
+
+
+with patch.object(lead_parser, "request_page", side_effect=fake_second):
+    out["captcha_second_status"] = run_job(claim(second_run))
+out["captcha_second_reviews"] = [db.business_review_count(str(800 + i)) for i in range(3)]
+
+# 11. A typo in the city: every card is from another city, the reason says to check the city (E-S-13).
+typo = new_job(count=3, review_limit=0, niche="кафе десять", city="Казнь")
+
+
+def fake_typo(_session, url):
+    if "/maps/org/" in url:
+        return url, card_page(url.rstrip("/").split("/")[-1])
+    return url, search_page(5).replace("cafe/1", "cafe/9")
+
+
+with patch.object(lead_parser, "request_page", side_effect=fake_typo):
+    out["typo_status"] = run_job(claim(typo))
+out["typo_reason"] = db.job(typo)["result"]["reason"]
 print(json.dumps(out, ensure_ascii=False))

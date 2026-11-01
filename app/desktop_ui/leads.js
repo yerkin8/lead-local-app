@@ -113,7 +113,9 @@
     await loadFeed(false);
     node.innerHTML = `<div class="lead-toolbar"><input id="lead-q" type="search" enterkeyhint="search" autocomplete="off"
         placeholder="Название или телефон" aria-label="Поиск по лидам" value="${E(L.q)}">
-      <button type="button" class="ghost lead-filter-btn" data-lead-filters aria-label="Фильтры">Фильтры</button></div>
+      <button type="button" class="ghost lead-filter-btn" data-lead-filters aria-label="Фильтры">Фильтры</button>
+      ${LEM.kind === 'desktop' ? '<button type="button" class="btn" data-lead-add>Добавить лида</button><button type="button" class="ghost" data-phones-refill title="Открыть карточки лидов с одним номером и забрать скрытые номера">Дособрать номера</button>' : ''}</div>
+      <div id="cards-job" class="cards-job" ${cardsJob ? '' : 'hidden'}>${cardsJob ? cardsJobHtml(cardsJob) : ''}</div>
       ${chips()}${activeFilters()}
       <div class="lead-list-head"><span class="muted small">${E(L.counts[L.segment] || 0)} ${plural(L.counts[L.segment] || 0, 'лид', 'лида', 'лидов')}${L.segment === 'new' ? ' · сначала без сайта и с высоким рейтингом' : ''}</span>
         <span class="lead-head-actions">${L.counts[L.segment] && !L.selecting ? '<button type="button" class="link-btn" data-lead-mailing>Разослать этой пачке</button>' : ''}<button type="button" class="link-btn" data-lead-select>${L.selecting ? 'Готово' : 'Выбрать'}</button></span></div>
@@ -135,19 +137,95 @@
     }));
   }
 
+  // ---------- «Добавить лида» and «Дособрать номера»: one background card job with a status line ----------
+  let cardsJob = null;
+  let cardsTimer = null;
+  const CARD_PHASE = { link: 'Открываю ссылку', card: 'Читаю карточку', reviews: 'Сохраняю отзывы' };
+  function cardsJobHtml(job) {
+    const p = job.progress || {}, r = job.result || {}, mode = (job.params || {}).mode;
+    const active = ['queued', 'running'].includes(job.status);
+    let text;
+    if (mode === 'phones') {
+      text = active ? `Дособираю номера: ${E(p.done ?? 0)} из ${E(p.total ?? (job.params.ids || []).length)} · новых ${E(p.added ?? 0)}`
+        : job.status === 'blocked' ? `Яндекс ограничил запросы (капча). Проверено ${E(r.done ?? 0)} из ${E(r.total ?? '')}, новых номеров ${E(r.added ?? 0)}. Повторите позже`
+        : job.status === 'stopped' ? 'Дособор номеров остановлен. Найденное сохранено'
+        : job.status === 'failed' ? `Ошибка: ${E(job.error || '')}` : E(r.reason || 'Готово');
+    } else {
+      text = active ? `Добавляю лида: ${E(CARD_PHASE[p.phase] || 'в очереди')}…`
+        : job.status === 'blocked' ? 'Яндекс показал капчу. Попробуйте позже'
+        : job.status === 'stopped' ? 'Добавление остановлено'
+        : job.status === 'failed' ? E(job.error || 'Не получилось') : E(r.reason || 'Готово');
+    }
+    return `<span>${text}</span>${active ? `<button type="button" class="ghost" data-cards-stop="${E(job.id)}">${p.stopping ? 'Останавливаю…' : 'Остановить'}</button>`
+      : `${mode === 'add' && r.business_id ? `<button type="button" class="btn" data-lead-open="${E(r.business_id)}">Открыть лида</button>` : ''}<button type="button" class="link-btn" data-cards-close>Скрыть</button>`}`;
+  }
+  function watchCardsJob(id) {
+    clearTimeout(cardsTimer);
+    const tick = () => safe(async () => {
+      const job = await call('cards_job', id);
+      const was = cardsJob && ['queued', 'running'].includes(cardsJob.status);
+      cardsJob = job;
+      const box = document.querySelector('#cards-job');
+      if (box) { box.hidden = false; box.innerHTML = cardsJobHtml(job); }
+      if (['queued', 'running'].includes(job.status)) { cardsTimer = setTimeout(tick, 1500); return; }
+      if (!was) return;
+      if (job.params.mode === 'add' && job.status === 'done' && job.result?.business_id) { snack(job.result.reason || 'Лид добавлен'); openLead(job.result.business_id); }
+      else if (state.view === 'leads') { await loadFeed(false); const list = document.querySelector('#lead-list'); if (list) list.innerHTML = L.items.length ? L.items.map(row).join('') : emptyState(); }
+    });
+    tick();
+  }
+  function addLeadSheet() {
+    sheet(`<h2>Добавить лида</h2><form id="lead-add-form">
+      <label class="field">Ссылка на организацию в Яндекс.Картах<input name="url" required autocomplete="off"
+        placeholder="https://yandex.ru/maps/org/…  или  yandex.ru/maps/-/…"></label>
+      <details class="lead-more-block"><summary>Ниша и город (необязательно)</summary>
+        <label class="field">Ниша<input name="niche" autocomplete="off" placeholder="Из рубрики карточки"></label>
+        <label class="field">Город<input name="city" autocomplete="off" placeholder="Из адреса карточки"></label></details>
+      <p class="muted small">Приложение откроет карточку как при поиске: все номера, сайт, отзывы по лимиту из «Настроек». Тип сайта не фильтруется.</p>
+      <button class="btn primary sheet-apply">Добавить</button></form>`);
+    setTimeout(() => document.querySelector('#lead-add-form input')?.focus(), 50);
+  }
+  document.addEventListener('submit', (e) => {
+    if (e.target.id !== 'lead-add-form') return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    const f = new FormData(e.target);
+    safe(async () => {
+      const result = await call('lead_add', String(f.get('url') || ''), String(f.get('niche') || ''), String(f.get('city') || ''));
+      document.querySelector('.lead-sheet')?.remove();
+      if (result.existed) { snack('Этот лид уже есть — открываю'); openLead(result.business_id); return; }
+      cardsJob = { id: result.job_id, status: 'queued', params: { mode: 'add' }, progress: {} };
+      const box = document.querySelector('#cards-job');
+      if (box) { box.hidden = false; box.innerHTML = cardsJobHtml(cardsJob); }
+      watchCardsJob(result.job_id);
+    });
+  }, true);
+
   // ---------- card ----------
+  // The owner's own numbers and links (manual_contacts): marked and removable.
+  function manualOf(b, kind, value) {
+    const norm = (v) => kind === 'phone' ? String(v).replace(/\D/g, '').replace(/^8(?=\d{10}$)/, '7') : String(v).replace(/\/+$/, '').toLowerCase();
+    return (b.manual_contacts || []).find((m) => m.kind === kind && norm(m.value) === norm(value));
+  }
+  function manualMark(m) {
+    return m ? `<em class="lead-manual">добавлен вручную</em><button type="button" class="link-btn lead-manual-del" data-contact-delete="${E(m.id)}" aria-label="Убрать">✕</button>` : '';
+  }
   function contactRows(b) {
     const rows = [];
     for (const c of b.contacts) {
       rows.push(`<button type="button" class="lead-line" data-open-chat="${E(c.url)}"><span>${c.channel === 'username' ? 'Telegram' : 'Telegram по номеру'}</span><b>${E(c.contact)}</b></button>`);
     }
     for (const phone of (b.phones || [])) {
-      rows.push(`<a class="lead-line" href="tel:${E(String(phone).replace(/[^+\d]/g, ''))}"><span>Позвонить</span><b>${E(phone)}</b></a>`);
+      rows.push(`<div class="lead-line-wrap"><a class="lead-line" href="tel:${E(String(phone).replace(/[^+\d]/g, ''))}"><span>Позвонить</span><b>${E(phone)}</b></a>${manualMark(manualOf(b, 'phone', phone))}</div>`);
     }
-    const bare = (u) => String(u).replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+    const bare = (u) => String(u).replace(/^https?:\/\//, '').replace(/[?#].*$/, '').replace(/\/$/, '').toLowerCase();
     const shown = new Set(b.contacts.map((c) => bare(c.url)));
-    for (const l of (b.links || []).filter((x) => /vk\.com|t\.me|wa\.me|instagram|ok\.ru/.test(x.url) && !shown.has(bare(x.url)))) {
-      rows.push(`<button type="button" class="lead-line" data-open-url="${E(l.url)}"><span>${E(l.label || 'Соцсеть')}</span><b>${E(l.url.replace(/^https?:\/\//, ''))}</b></button>`);
+    if (b.website) shown.add(bare(b.website));
+    if (b.map_url) shown.add(bare(b.map_url));
+    for (const l of [...(b.links || []), ...(b.socials || [])]) {
+      if (!l || !l.url || shown.has(bare(l.url))) continue;
+      shown.add(bare(l.url));
+      const view = LeadNav.linkView(l.url, l.label);
+      rows.push(`<div class="lead-line-wrap"><button type="button" class="lead-line" data-open-url="${E(l.url)}"><span>${E(view.label)}</span><b>${E(view.text)}</b></button>${manualMark(manualOf(b, 'link', l.url))}</div>`);
     }
     if (b.website) rows.push(`<button type="button" class="lead-line" data-open-url="${E(b.website)}"><span>${E(['Сайт', typeLabel(b.site_type)].filter(Boolean).join(' · '))}</span><b>${E(b.website.replace(/^https?:\/\//, ''))}</b></button>`);
     else rows.push(`<div class="lead-line static"><span>Сайт</span><b>${E(typeLabel(b.site_type) || 'Нет')}</b></div>`);
@@ -159,12 +237,12 @@
   }
   function details(b) {
     const hours = (b.hours || []).length ? `<div class="lead-kv">${b.hours.map((h) => `<div><span>${E(h.weekday)}</span><b>${h.is_closed ? 'выходной' : E(`${h.opens || ''}–${h.closes || ''}`)}</b></div>`).join('')}</div>` : '';
-    const reviews = (b.review_items || []).length ? b.review_items.slice(0, 5).map((r) => `<p class="lead-review">${E(r.text)}${r.rating ? ` <small>${E(r.rating)} из 5</small>` : ''}</p>`).join('') : '';
-    const links = (b.links || []).length ? `<div class="lead-kv">${b.links.map((l) => `<div><span>${E(l.label || l.type)}</span><button type="button" class="link-btn" data-open-url="${E(l.url)}">${E(l.url.replace(/^https?:\/\//, ''))}</button></div>`).join('')}</div>` : '';
+    const reviews = (b.review_items || []).length ? b.review_items.slice(0, 20).map((r) => `<p class="lead-review">${E(r.text)}${r.rating ? ` <small>${E(r.rating)} из 5</small>` : ''}</p>`).join('') : '';
+    const features = (b.features || []).length ? `<div class="lead-kv">${b.features.map((f) => `<div><span>${E(f.name)}</span><b>${E(f.value || 'есть')}</b></div>`).join('')}</div>` : '';
     const history = (b.history || []).length ? `<div class="lead-kv">${b.history.slice(0, 8).map((h) => `<div><span>${E((h.changed_at || '').slice(0, 10))}</span><b>${E(statusName(h.old_status))} → ${E(statusName(h.new_status))}</b></div>`).join('')}</div>` : '';
     return more('Предложения: сайт, лендинг, бот, карты', typeof offersHtml === 'function' ? offersHtml(b.offers) : '')
       + more(`Отзывы${b.review_items?.length ? ` · ${b.review_items.length}` : ''}`, reviews)
-      + more('Часы работы', hours) + more('Ссылки', links) + more('История', history);
+      + more('Режим работы', hours) + more('Особенности', features) + more('История', history);
   }
 
   function writeLabel(b) {
@@ -219,8 +297,9 @@
     const list = offers(b);
     if (offerIndex >= list.length) offerIndex = -1;
     const chip = (i, name) => `<button type="button" role="radio" aria-checked="${i === offerIndex}" class="${i === offerIndex ? 'active' : ''}" data-bar-offer="${i}">${E(name)}</button>`;
-    const nav = LeadNav.neighbours(L.items.map((i) => i.id), b.id);
-    const hasNext = nav.next || (nav.index >= 0 && L.more);
+    const source = sourceIds();
+    const nav = LeadNav.neighbours(source ? source.ids : [], b.id);
+    const hasNext = nav.next || (source && source.view === 'leads' && nav.index >= 0 && L.more);
     const auto = LeadNav.readFlag(AUTO_NEXT, true);
     const [label, ok] = writeLabel(b);
     return `<div class="lead-bar" role="toolbar" aria-label="Действия с лидом">
@@ -230,16 +309,28 @@
         ${b.contacts.length ? `<button type="button" class="btn primary" data-bar-write ${ok ? '' : 'disabled'}>${E(label)}</button>` : ''}</div>` : ''}
       <div class="lead-bar-row"><div class="lead-status-row" role="radiogroup" aria-label="Статус">${STATUSES.map(([k, name]) =>
         `<button type="button" role="radio" aria-checked="${b.status === k}" class="${b.status === k ? 'active' : ''}" data-lead-set-status="${k}">${E(name)}</button>`).join('')}</div></div>
-      <div class="lead-bar-row lead-bar-nav">
+      ${source && nav.index >= 0 ? `<div class="lead-bar-row lead-bar-nav">
         <button type="button" class="ghost" data-lead-prev ${nav.prev ? '' : 'disabled'}>← Пред.</button>
-        <span class="muted small">${nav.index >= 0 ? `${nav.index + 1} из ${E(L.counts[L.segment] || L.items.length)}` : 'Не из списка «Лиды»'}</span>
+        <span class="muted small">${nav.index + 1} из ${E(source.view === 'leads' ? (L.counts[L.segment] || L.items.length) : source.ids.length)}${source.view === 'today' ? ' в «Сегодня»' : ''}</span>
         <button type="button" class="ghost" data-lead-next ${hasNext ? '' : 'disabled'}>След. →</button>
-        <label class="lead-bar-auto"><input type="checkbox" data-lead-auto ${auto ? 'checked' : ''}> Дальше после статуса</label></div></div>`;
+        <label class="lead-bar-auto"><input type="checkbox" data-lead-auto ${auto ? 'checked' : ''}> Дальше после статуса</label></div>` : ''}</div>`;
+  }
+  // The list «← Пред. / След. →» walks: «Лиды» when the card came from there, the «Сегодня» queue when it
+  // came from «Сегодня»; from anywhere else (mailing, search results) there is no list to walk.
+  function sourceView() {
+    const last = (state.navigation || []).filter((x) => x.view !== 'lead').at(-1);
+    return last ? last.view : 'leads';
+  }
+  function sourceIds() {
+    const view = sourceView();
+    if (view === 'leads') return { view, ids: L.items.map((i) => i.id) };
+    if (view === 'today' && Array.isArray(window.todayQueueIds)) return { view, ids: window.todayQueueIds };
+    return null;
   }
   async function stepLead(dir) {
-    const ids = () => L.items.map((i) => i.id);
+    const ids = () => (sourceIds() || { ids: [] }).ids;
     let nav = LeadNav.neighbours(ids(), lead.id);
-    if (dir > 0 && !nav.next && nav.index >= 0 && L.more) { await loadFeed(true); nav = LeadNav.neighbours(ids(), lead.id); }
+    if (dir > 0 && !nav.next && nav.index >= 0 && L.more && sourceView() === 'leads') { await loadFeed(true); nav = LeadNav.neighbours(ids(), lead.id); }
     const id = dir > 0 ? nav.next : nav.prev;
     if (id) openLead(id, true);
     return Boolean(id);
@@ -264,16 +355,22 @@
       ${actionBar(b)}
       <div class="lead-actions">
         <button type="button" class="btn lead-maps" data-open-url="${E(b.map_url)}">Яндекс.Карты</button>
+        ${LEM.kind === 'desktop' ? '<button type="button" class="btn" data-lead-refresh>Обновить с Яндекс.Карт</button>' : ''}
+        <button type="button" class="btn" data-today-add="${E(b.id)}">В «Сегодня»</button>
+        ${LEM.kind === 'desktop' ? `<button type="button" class="btn" data-media="${E(b.id)}">Медиа</button>` : ''}
         <button type="button" class="ghost lead-delete" data-lead-delete>${b.hidden ? 'Вернуть' : 'Удалить'}</button></div>
       <p class="lead-pause" id="lead-pause" hidden></p>
       ${b.contacts.length ? '' : '<p class="lead-note-warn">Нет Telegram. Позвоните, напишите в соцсеть из блока ниже или откройте Яндекс.Карты.</p>'}
       ${b.do_not_contact ? '<p class="lead-note-warn">Этот лид попросил не писать.</p>' : ''}
       ${b.last_outreach ? `<p class="muted small">Последнее сообщение: ${E((b.last_outreach.resolved_at || b.last_outreach.opened_at || '').slice(0, 10))} · ${E(b.last_outreach.contact)}</p>` : ''}
       <div class="lead-lines">${contactRows(b)}</div>
+      ${b.contacts.some((c) => c.channel !== 'username') ? '<p class="muted small">Если номер не открывается в Telegram, это может означать и скрытую видимость номера у владельца, а не отсутствие аккаунта.</p>' : ''}
+      <div class="lead-add-contact"><button type="button" class="link-btn" data-contact-add="phone">+ Добавить номер</button>
+        <button type="button" class="link-btn" data-contact-add="link">+ Добавить ссылку</button></div>
       ${b.contacts.length ? more('Текст сообщения', `<p class="muted small">Подобран по типу сайта и нише. Можно поправить перед отправкой.</p>
         <textarea id="lead-text" rows="7">${E(b.text)}</textarea><p class="muted small">В конце добавится: «${E(b.footer)}»</p>`) : ''}
       ${details(b)}
-      <div class="lead-rare"><button type="button" class="link-btn" data-menu="old">Старый вид карточки</button>${LEM.kind === 'desktop' ? '<button type="button" class="link-btn" data-menu="media">Фото и товары</button>' : ''}</div></article>`;
+      <p class="muted small lead-updated">${b.updated_at ? `Данные с Яндекс.Карт: ${E(LeadNav.localTime(b.updated_at))}` : ''}</p></article>`;
     armMain(b);
   };
 
@@ -308,9 +405,10 @@
   async function reloadCard() { if (state.view === 'lead') await render(); }
 
   function nextLeadId(current) {
-    const ids = L.items.map((i) => i.id);
-    const at = ids.indexOf(current);
-    return at >= 0 ? ids[at + 1] : ids.find((id) => id !== current);
+    const source = sourceIds();
+    if (!source) return null;
+    const at = source.ids.indexOf(current);
+    return at >= 0 ? source.ids[at + 1] : (source.view === 'leads' ? source.ids.find((id) => id !== current) : null);
   }
   function openLead(id, replace = false) {
     document.querySelector('#snackbar')?.classList.remove('show');
@@ -328,7 +426,6 @@
     const b = lead;
     const items = [
       ['delete', b.hidden ? 'Вернуть в список' : 'Удалить лид', 'danger'],
-      ['old', 'Подробная карточка', ''],
       ...(LEM.kind === 'desktop' ? [['media', 'Фото и товары', '']] : []),
     ];
     sheet(`<h2>${E(b.name)}</h2>${items.map(([k, label, tone]) => `<button type="button" class="sheet-item ${tone}" data-menu="${k}">${E(label)}</button>`).join('')}`);
@@ -449,6 +546,16 @@
     else if (b.hasAttribute('data-lead-select')) { L.selecting = !L.selecting; L.selected.clear(); render(); }
     else if (b.hasAttribute('data-lead-more')) safe(async () => { await loadFeed(true); document.querySelector('#lead-list').innerHTML = L.items.map(row).join(''); b.hidden = !L.more; });
     else if (b.hasAttribute('data-lead-filters')) filtersSheet();
+    else if (b.hasAttribute('data-lead-add')) addLeadSheet();
+    else if (b.hasAttribute('data-phones-refill')) safe(async () => {
+      const result = await call('phones_refill');
+      if (!result.job_id) { snack('У всех лидов уже по несколько номеров или есть мобильный'); return; }
+      snack(result.already ? 'Дособор номеров уже идёт' : `Открою ${result.total} ${plural(result.total, 'карточку', 'карточки', 'карточек')} по одной, с паузами`);
+      cardsJob = { id: result.job_id, status: 'queued', params: { mode: 'phones', ids: [] }, progress: { total: result.total } };
+      watchCardsJob(result.job_id);
+    });
+    else if (b.dataset.cardsStop) safe(async () => { await call('cards_stop', b.dataset.cardsStop); b.textContent = 'Останавливаю…'; });
+    else if (b.hasAttribute('data-cards-close')) { cardsJob = null; const box = document.querySelector('#cards-job'); if (box) box.hidden = true; }
     else if (b.dataset.clearFilter) { L[b.dataset.clearFilter] = ''; save(); render(); }
     else if (b.dataset.emptyAction) {
       const a = b.dataset.emptyAction;
@@ -467,6 +574,13 @@
       if (refused) snack(`${name}: отказ. Удалить из списков?`, [['Удалить', () => hideLead(id, name)]]);
       else if (moved) snack(`${name}: ${statusName(b.dataset.leadSetStatus)}`);
     });
+    else if (b.hasAttribute('data-lead-refresh')) safe(async () => {
+      b.disabled = true; b.textContent = 'Обновляю…';
+      try { await call('business_refresh', lead.id); snack('Карточка обновлена с Яндекс.Карт'); }
+      finally { await reloadCard(); }
+    });
+    else if (b.dataset.contactAdd) addContact(b.dataset.contactAdd);
+    else if (b.dataset.contactDelete) safe(async () => { await call('lead_contact_delete', Number(b.dataset.contactDelete)); snack('Контакт убран'); reloadCard(); });
     else if (b.hasAttribute('data-lead-prev')) safe(() => stepLead(-1));
     else if (b.hasAttribute('data-lead-next')) safe(() => stepLead(1));
     else if (b.dataset.barOffer) {
@@ -484,11 +598,32 @@
     else if (b.dataset.menu) {
       document.querySelector('.lead-sheet')?.remove();
       if (b.dataset.menu === 'delete') { lead.hidden ? safe(async () => { await call('leads_restore', [lead.id]); snack('Лид возвращён'); render(); }) : hideLead(); }
-      else if (b.dataset.menu === 'old') setView('detail', { businessId: lead.id });
       else if (b.dataset.menu === 'media') setView('media', { mediaBusiness: lead.id, mediaManual: false });
     }
     else if (b.dataset.resultsGo) { const go = b.dataset.resultsGo; if (go === 'search') setView('search'); else { L.segment = go; save(); setView('leads'); } }
   });
+  // «Добавить номер» / «Добавить ссылку»: kept apart from the parser data, survives «Обновить с Яндекс.Карт».
+  function addContact(kind) {
+    const phone = kind === 'phone';
+    sheet(`<h2>${phone ? 'Добавить номер' : 'Добавить ссылку'}</h2><form id="lead-contact-form" data-kind="${kind}">
+      <label class="field">${phone ? 'Номер телефона' : 'Ссылка: Telegram, сайт или соцсеть'}<input name="value" required autocomplete="off"
+        ${phone ? 'inputmode="tel" placeholder="+7 900 123-45-67"' : 'placeholder="t.me/name, @name, vk.com/name, сайт.рф"'}></label>
+      <p class="muted small">${phone ? 'Мобильный номер получит ссылку «Telegram по номеру».' : 'Username из t.me попадёт в «Написать в Telegram» и в рассылку.'}</p>
+      <button class="btn primary sheet-apply">Добавить</button></form>`);
+    setTimeout(() => document.querySelector('#lead-contact-form input')?.focus(), 50);
+  }
+  document.addEventListener('submit', (e) => {
+    if (e.target.id !== 'lead-contact-form') return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    const form = e.target;
+    safe(async () => {
+      await call('lead_contact_add', lead.id, form.dataset.kind, String(new FormData(form).get('value') || ''));
+      document.querySelector('.lead-sheet')?.remove();
+      snack(form.dataset.kind === 'phone' ? 'Номер добавлен' : 'Ссылка добавлена');
+      reloadCard();
+    });
+  }, true);
+
   function hideLead(id = lead.id, name = lead.name) {
     const next = state.view === 'lead' && lead && lead.id !== id ? null : nextLeadId(id);
     safe(async () => {

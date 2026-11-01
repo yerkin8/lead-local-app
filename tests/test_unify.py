@@ -102,7 +102,7 @@ db.init_desktop_db(); db.init_desktop_db()
 with sqlite3.connect(config.DB_PATH) as conn:
     print(json.dumps(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]))
 """, tmp)
-            self.assertEqual(result, 7)
+            self.assertEqual(result, 8)   # 8: manual_contacts (next2)
 
 
 class ImportTests(unittest.TestCase):

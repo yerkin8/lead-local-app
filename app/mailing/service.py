@@ -15,10 +15,11 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from . import gateway as gw
-from .engine import Credentials, Engine
+from .entities import strip_markdown_links
+from .engine import REPEAT_SKIP_STATUSES, Credentials, Engine
 from .gateway import GatewayError, TelegramGateway
 from .logsafe import get_logger, mask_digits, scrub
-from .policy import Policy, recipient_tz, zone, DEFAULT_TZ
+from .policy import Policy, recipient_tz, when_text, zone, DEFAULT_TZ
 from .protect import read_secret, restrict_folder, write_secret
 from .store import TERMINAL, Store, iso, parse, utcnow
 
@@ -33,9 +34,6 @@ CONFIRM_WORD = "ОТПРАВИТЬ"
 MAX_TEST_RECIPIENTS = 5
 AUTO_SCRIPT = "auto"  # each business gets the first-message script for its site type
 AUTO_REMINDER = "auto:reminder"  # each business gets the reminder script (follow-up stage)
-# Lead statuses in «Лиды» that leave a business out of repeats by default (already talking or refused).
-REPEAT_SKIP_STATUSES = {"replied": "Ответили", "working": "В работе", "completed": "Договорились",
-                        "unsuitable": "Отказ"}
 MAX_SELECTED = 500  # leads picked in «Лиды» for one campaign
 
 
@@ -77,7 +75,8 @@ def phone_keys(business: dict) -> list[str]:
 
 
 def with_footer(text: str) -> str:
-    text = str(text or "").strip()
+    from ..domain import strip_links
+    text = strip_links(text)   # no links in outgoing messages (docs/next/DECISIONS.md N29)
     return text if OPT_OUT_FOOTER.casefold() in text.casefold() else f"{text}\n\n{OPT_OUT_FOOTER}"
 
 
@@ -112,6 +111,7 @@ class MailingService:
                              save_session=self._save_session, policy=self.policy,
                              test_recipients=self.test_recipients, external_blocked=external_blocked,
                              on_sent=self._after_sent, on_reply=self._after_reply,
+                             lead_status=lambda business_id: (self._business(business_id) or {}).get("status", ""),
                              **(engine_options or {}))
 
     # ------------------------------------------------------------ lifecycle
@@ -184,6 +184,36 @@ class MailingService:
     def test_recipients(self) -> set[str]:
         data = read_secret(self.dir / "test_recipients.bin") or {}
         return set(data.get("targets") or [])
+
+    def _test_targets(self) -> list[str]:
+        return list((read_secret(self.dir / "test_recipients.bin") or {}).get("targets") or [])
+
+    def test_recipients_list(self) -> list[dict]:
+        """«Тесты»: the owner's test recipients, masked on screen (@al***), removable by position."""
+        result = []
+        for index, target in enumerate(self._test_targets()):
+            shown = mask_digits(target) if target.startswith("+") else "@" + target[:2] + "***"
+            result.append({"index": index, "shown": shown})
+        return result
+
+    def test_recipient_add(self, value: str) -> dict:
+        target = normalize_target(str(value or ""))
+        if not target:
+            raise ValueError("Укажите username Telegram (@name) или номер из ваших контактов (+7…)")
+        targets = self._test_targets()
+        if target in targets:
+            return {"count": len(targets), "added": False}
+        if len(targets) >= 20:
+            raise ValueError("Не больше 20 тестовых адресатов")
+        return {"count": self.set_test_recipients(targets + [target]), "added": True}
+
+    def test_recipient_remove(self, index: int) -> dict:
+        targets = self._test_targets()
+        index = int(index)
+        if not 0 <= index < len(targets):
+            raise ValueError("Адресат не найден")
+        targets.pop(index)
+        return {"count": self.set_test_recipients(targets)}
 
     # ------------------------------------------------------------- accounts
     def _account_path(self, account_id: int) -> Path:
@@ -413,19 +443,23 @@ class MailingService:
                          "text": self._message(template, item)})
             if len(rows) == 3:
                 break
-        problems = [] if template == AUTO_SCRIPT else sorted(set(BRACKETS.findall(template)))
+        problems = [] if template == AUTO_SCRIPT else sorted(set(BRACKETS.findall(strip_markdown_links(template))))
         return {"total": len(selected), "items": rows, "unfilled": problems,
                 "with_username": sum(1 for item in selected if item["_username"])}
 
     def create_campaign(self, title: str, filters: dict, template: str, account_ids: list,
-                        kind: str = "normal", limit: int | None = None, *, batch: dict | None = None) -> dict:
+                        kind: str = "normal", limit: int | None = None, *, batch: dict | None = None,
+                        no_wait: bool = False) -> dict:
         template = str(template or "").strip()
         if not template:
             raise ValueError("Введите текст сообщения")
-        if BRACKETS.search(template):
-            raise ValueError("Замените поля в квадратных скобках: " + ", ".join(sorted(set(BRACKETS.findall(template)))))
+        # [слова](https://…) is a link on the words, not an unfilled field.
+        if BRACKETS.search(strip_markdown_links(template)):
+            raise ValueError("Замените поля в квадратных скобках: " + ", ".join(sorted(set(BRACKETS.findall(strip_markdown_links(template))))))
         if kind not in ("normal", "test"):
             raise ValueError("Неизвестный тип кампании")
+        if no_wait and kind != "test":
+            raise ValueError("«Без ожидания» — только для тестов")
         accounts = [self.store.row("SELECT * FROM accounts WHERE id=?", (int(item),)) for item in account_ids or []]
         accounts = [item for item in accounts if item]
         if not accounts:
@@ -450,10 +484,10 @@ class MailingService:
             batch = batch or {}
             campaign_id = conn.execute(
                 "INSERT INTO campaigns (title,kind,mode,status,template,filters_json,created_at,updated_at,"
-                "batch_id,parent_id,stage) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "batch_id,parent_id,stage,no_wait) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (str(title or "").strip()[:120] or "Новая рассылка", kind, "dry", "draft", template,
                  json.dumps(filters or {}, ensure_ascii=False), now, now, batch.get("batch_id"),
-                 batch.get("parent_id"), batch.get("stage") or "first")).lastrowid
+                 batch.get("parent_id"), batch.get("stage") or "first", 1 if no_wait else 0)).lastrowid
             conn.executemany("INSERT INTO campaign_accounts VALUES (?,?)", [(campaign_id, a["id"]) for a in accounts])
             seen_phones: set[str] = set()
             seen_keys: set[str] = set()
@@ -462,7 +496,8 @@ class MailingService:
                 status, reason_kind, reason = "queued", "", ""
                 if kind == "test":
                     username = targets[position % len(targets)]
-                    key, tz = f"test:{item['id']}", ""
+                    # The owner's own accounts: Moscow time, the same window as businesses (E-M-04).
+                    key, tz = f"test:{item['id']}", DEFAULT_TZ
                 else:
                     username = item["_username"]
                     key = username or f"business:{item['id']}"
@@ -522,8 +557,8 @@ class MailingService:
             raise ValueError("Текст сообщения пустой")
         if len(text) > 4000:
             raise ValueError("Сообщение длиннее 4000 символов")
-        if BRACKETS.search(text):
-            raise ValueError("Замените поля в квадратных скобках: " + ", ".join(sorted(set(BRACKETS.findall(text)))))
+        if BRACKETS.search(strip_markdown_links(text)):
+            raise ValueError("Замените поля в квадратных скобках: " + ", ".join(sorted(set(BRACKETS.findall(strip_markdown_links(text))))))
         message = with_footer(text)
         with self.store.tx() as conn:
             conn.execute("UPDATE recipients SET message=?,edited=1 WHERE id=?", (message, recipient["id"]))
@@ -578,7 +613,7 @@ class MailingService:
                          (self._batch_id(campaign), str(business_id)))
         return {"excluded": False}
 
-    def repeat_preview(self, campaign_id: int) -> dict:
+    def repeat_preview(self, campaign_id: int, template: str = AUTO_REMINDER) -> dict:
         """Who gets a repeat of this campaign: those who got (or in a dry run would get) its message,
         minus excluded, replied, stop-list, «Не писать» and leads already talking or refused."""
         source = self._batch_row(campaign_id)
@@ -588,6 +623,12 @@ class MailingService:
         replied = {row["business_id"] for row in self.store.rows(
             "SELECT DISTINCT r.business_id FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
             "WHERE COALESCE(c.batch_id,c.id)=? AND r.replied_at IS NOT NULL", (batch_id,))}
+        stage = "reminder" if (str(template or "").strip() or AUTO_REMINDER) == AUTO_REMINDER else "repeat"
+        # Each stage reaches an organization at most once per batch, counting live repeats still queued (E-M-10).
+        had_stage = {row["business_id"] for row in self.store.rows(
+            "SELECT DISTINCT r.business_id FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
+            "WHERE COALESCE(c.batch_id,c.id)=? AND c.stage=? AND (r.status IN ('sent','sending') "
+            "OR (r.status='queued' AND c.mode='live'))", (batch_id, stage))}
         stop = self.store.stop_set()
         blocked = set(self._external_blocked() or ())
         include, skip = [], []
@@ -605,6 +646,8 @@ class MailingService:
             if row["status"] not in ("sent", "dry_sent"):
                 reason = ("Первое сообщение не дошло" if row["status"] in ("failed", "unreachable")
                           else "Не получал сообщение")
+            elif row["business_id"] in had_stage:
+                reason = "Напоминание уже получал" if stage == "reminder" else "Этот повтор уже получал"
             elif row["business_id"] in excluded:
                 reason = "Убран из пачки"
             elif row["business_id"] in replied:
@@ -619,7 +662,7 @@ class MailingService:
             item = {"business_id": row["business_id"], "name": row["business_name"], "reason": reason,
                     "lead_status": status}
             (skip if reason else include).append(item)
-        return {"campaign_id": source["id"], "batch_id": batch_id, "kind": source["kind"],
+        return {"campaign_id": source["id"], "batch_id": batch_id, "kind": source["kind"], "stage": stage,
                 "include": include, "skip": skip,
                 "accounts": [row["account_id"] for row in self.store.rows(
                     "SELECT account_id FROM campaign_accounts WHERE campaign_id=?", (source["id"],))]}
@@ -639,10 +682,10 @@ class MailingService:
             raise ValueError("Кампания ещё идёт — повторить можно после её окончания или на паузе")
         if live and source["mode"] != "live":
             raise ValueError("Это был сухой запуск: первое сообщение никто не получил. Повтор — тоже только сухой")
-        plan = self.repeat_preview(source["id"])
+        plan = self.repeat_preview(source["id"], template)
         ids = [item["business_id"] for item in plan["include"]]
         if not ids:
-            raise ValueError("В повтор некого включить: все ответили, убраны или в стоп-листе")
+            raise ValueError("В повтор некого включить: все ответили, убраны, в стоп-листе или уже получили этот этап")
         stage = "reminder" if template == AUTO_REMINDER else "repeat"
         root = self._batch_row(plan["batch_id"])
         title = str(title or "").strip() or f"{root['title']} · {'напоминание' if stage == 'reminder' else 'повтор'}"
@@ -695,7 +738,7 @@ class MailingService:
             "WHERE ca.campaign_id=? GROUP BY a.id ORDER BY a.id", (row["id"],))
         recipients = self.store.rows(
             "SELECT id,business_id,business_name,account_id,username,status,reason_kind,reason,msg_id,sent_at,"
-            "replied_at,message,edited "
+            "replied_at,message,edited,tz "
             "FROM recipients WHERE campaign_id=? ORDER BY position LIMIT ?", (row["id"], int(recipients_limit)))
         test_kind = row["kind"] == "test"
         batch_id = self._batch_id(row)
@@ -706,6 +749,10 @@ class MailingService:
                 item["username"] = mask_digits(item["username"])
             business = self._business(item["business_id"]) or {}
             item["lead_status"] = business.get("status") or ""
+            if item["sent_at"]:
+                item["sent_when"] = "Ушло " + when_text(parse(item["sent_at"]), item.pop("tz", ""),
+                                                        "" if test_kind else business.get("city", ""))
+            item.pop("tz", None)
             item["excluded"] = item["business_id"] in excluded
         row["batch_id"] = batch_id
         row["batch"] = self.store.rows(
@@ -783,15 +830,15 @@ class MailingService:
             sim["today"] += 1
             sim["hour"] = [item for item in sim["hour"] if item > due - timedelta(hours=1)] + [due]
             sim["next"] = due + timedelta(seconds=(policy.delay_min + policy.delay_max) // 2)
-            local = due.astimezone(zone(recipient["tz"] or DEFAULT_TZ)).strftime("%d.%m %H:%M")
+            city = "" if campaign["kind"] == "test" else (self._business(recipient["business_id"]) or {}).get("city", "")
+            local = when_text(due, recipient["tz"], city)
             with self.store.tx() as conn:
                 conn.execute("INSERT INTO attempts (recipient_id,account_id,random_id,mode,status,started_at,"
                              "finished_at,server_response) VALUES (?,?,0,'dry','dry',?,?,?)",
                              (recipient["id"], account["id"], iso(utcnow()), iso(utcnow()),
                               f"сухой запуск: ушло бы {local}"))
                 conn.execute("UPDATE recipients SET status='dry_sent',reason_kind='dry',reason=? WHERE id=?",
-                             (f"Ушло бы {local} по времени получателя" if recipient["tz"] else f"Ушло бы {local}",
-                              recipient["id"]))
+                             (f"Уйдёт {local}", recipient["id"]))
         with self.store.tx() as conn:
             conn.execute("UPDATE campaigns SET status='done',finished_at=?,updated_at=? WHERE id=?",
                          (iso(utcnow()), iso(utcnow()), campaign["id"]))
@@ -805,6 +852,12 @@ class MailingService:
         campaign = self.campaign(campaign_id, 0)
         if campaign["mode"] == "live":
             return campaign
+        if campaign.get("parent_id"):
+            # A repeat goes live only after a live message it repeats (E-M-13).
+            parent = self.store.row("SELECT mode FROM campaigns WHERE id=?", (campaign["parent_id"],))
+            if not parent or parent["mode"] != "live":
+                raise ValueError("Это повтор сухого запуска: предыдущее сообщение никто не получил. "
+                                 "Реальная отправка для него закрыта")
         with self.store.tx() as conn:
             conn.execute("UPDATE recipients SET status='queued',reason_kind='',reason='' WHERE campaign_id=? "
                          "AND status='dry_sent'", (campaign["id"],))

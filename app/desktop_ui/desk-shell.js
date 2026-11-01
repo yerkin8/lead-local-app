@@ -2,7 +2,7 @@
 // setView() highlights the item it was called with, but goBack() and the Mini App modules
 // switch state.view directly; detail pages belong to the section they were opened from.
 (function () {
-  const SECTION_OF = { lead: 'leads', detail: 'leads', telegram: 'leads' };
+  const SECTION_OF = { lead: 'leads', telegram: 'leads' };
   const baseRender = window.render;
   window.render = async function () {
     const result = await baseRender.apply(this, arguments);

@@ -6,7 +6,7 @@ const ML = {
   recipient: {queued: 'В очереди', sending: 'Отправляется', sent: 'Отправлено', dry_sent: 'Сухой запуск', skipped: 'Пропущено', unreachable: 'Недоступен', failed: 'Ошибка'},
   site: {'': 'Любой', no_site: 'Без сайта', weak_site: 'Сайт на конструкторе', unavailable: 'Сайт недоступен', other: 'Обычный сайт'},
   stage: {first: 'первое сообщение', reminder: 'напоминание', repeat: 'повтор'},
-  tabs: [['campaigns', 'Кампании'], ['accounts', 'Аккаунты'], ['stoplist', 'Стоп-лист'], ['policy', 'Правила отправки'], ['journal', 'Журнал']],
+  tabs: [['campaigns', 'Кампании'], ['tests', 'Тесты'], ['accounts', 'Аккаунты'], ['stoplist', 'Стоп-лист'], ['policy', 'Правила отправки'], ['journal', 'Журнал']],
 };
 state.mailingTab ||= 'campaigns';
 state.mailingCampaign ||= null;
@@ -45,6 +45,7 @@ async function mailingPage(node) {
   node.innerHTML = `${mlEmergency(o)}${tabs}<div id="ml-body">${empty('Загрузка…')}</div>`;
   const body = node.querySelector('#ml-body');
   if (state.mailingTab === 'accounts') return mailingAccounts(body, o);
+  if (state.mailingTab === 'tests') return mailingTests(body, o);
   if (state.mailingTab === 'stoplist') return mailingStoplist(body);
   if (state.mailingTab === 'policy') return mailingPolicy(body, o);
   if (state.mailingTab === 'journal') return mailingJournal(body, o);
@@ -200,7 +201,7 @@ function mlResult(r) {
   if (r.replied_at) return ['Ответил', 'green'];
   if (r.reason_kind === 'excluded') return ['Убран из пачки', ''];
   if (r.status === 'sent') return ['Отправлено', 'green'];
-  if (r.status === 'dry_sent') return ['Сухой запуск: ушло бы', 'purple'];
+  if (r.status === 'dry_sent') return ['Сухой запуск', 'purple'];
   if (r.status === 'queued' || r.status === 'sending') return ['В очереди', ''];
   if (r.status === 'unreachable' || r.status === 'failed') return ['Не дошло', 'warn'];
   if (r.status === 'skipped' && r.reason_kind === 'stoplist') return ['В стоп-листе', 'warn'];
@@ -223,7 +224,7 @@ function mailingRecipient(c, r) {
   const batchAction = c.kind === 'normal' || c.kind === 'test'
     ? (r.excluded ? `<button type="button" class="ghost" data-ml-include="${E(r.business_id)}">Вернуть в пачку</button>`
       : `<button type="button" class="ghost" data-ml-exclude="${E(r.business_id)}" title="Не писать ему в повторах этой пачки">Убрать из пачки</button>`) : '';
-  return `<div class="row small ml-recipient"><div class="row-head"><div><span class="row-title">${E(r.business_name)}</span><div class="muted">${who}${r.msg_id ? ` · сообщение № ${E(r.msg_id)}` : ''}${r.sent_at ? ` · ${E(mlTime(r.sent_at))}` : ''}</div></div><div class="row-actions"><div class="chips">${r.edited ? mlChip('Текст изменён', 'purple') : ''}${lead ? mlChip(`В «Лидах»: ${lead}`) : ''}${mlChip(result, tone)}</div>${batchAction}<button type="button" class="ghost" data-open="${E(r.business_id)}">Карточка</button></div></div>${r.reason && !['Отправлено'].includes(result) ? `<div class="muted">${E(r.reason)}</div>` : ''}${text}</div>`;
+  return `<div class="row small ml-recipient"><div class="row-head"><div><span class="row-title">${E(r.business_name)}</span><div class="muted">${who}${r.msg_id ? ` · сообщение № ${E(r.msg_id)}` : ''}${r.sent_when ? ` · ${E(r.sent_when)}` : r.sent_at ? ` · ${E(mlTime(r.sent_at))}` : ''}${r.status === 'dry_sent' && r.reason ? ` · ${E(r.reason)}` : ''}</div></div><div class="row-actions"><div class="chips">${r.edited ? mlChip('Текст изменён', 'purple') : ''}${lead ? mlChip(`В «Лидах»: ${lead}`) : ''}${mlChip(result, tone)}</div>${batchAction}<button type="button" class="ghost" data-open="${E(r.business_id)}">Карточка</button></div></div>${r.reason && !['Отправлено'].includes(result) ? `<div class="muted">${E(r.reason)}</div>` : ''}${text}</div>`;
 }
 
 async function mailingCampaignPage(node, o) {
@@ -237,7 +238,10 @@ async function mailingCampaignPage(node, o) {
     '<button type="button" class="btn" data-ml="refresh-campaign">Обновить статистику</button>',
     !c.counts.sent && c.status !== 'running' ? '<button type="button" class="ghost" data-ml="delete">Удалить</button>' : '',
   ].join('');
-  const goLive = !live ? `<form id="ml-live-form" class="ml-live"><div><strong>Реальная отправка выключена.</strong> Чтобы включить её осознанно, введите слово <code>${E(o.confirm_word)}</code>.${c.kind === 'normal' ? ' Сообщения получат настоящие организации.' : ' Сообщения получат только ваши тестовые адресаты.'}</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения" value="${E(state.mailingConfirm || '')}"><button class="danger">Включить реальную отправку</button></form>` : '';
+  const parent = c.parent_id ? (c.batch || []).find(x => x.id === c.parent_id) : null;
+  const dryRepeat = Boolean(parent && parent.mode !== 'live');
+  const goLive = !live && dryRepeat ? '<div class="inline-note">Это повтор сухого запуска: предыдущее сообщение никто не получил, поэтому реальная отправка для него закрыта.</div>'
+    : !live ? `<form id="ml-live-form" class="ml-live"><div><strong>Реальная отправка выключена.</strong> Чтобы включить её осознанно, введите слово <code>${E(o.confirm_word)}</code>.${c.kind === 'normal' ? ' Сообщения получат настоящие организации.' : ' Сообщения получат только ваши тестовые адресаты.'}</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения" value="${E(state.mailingConfirm || '')}"><button class="danger">Включить реальную отправку</button></form>` : '';
   node.innerHTML = `${mlEmergency(o)}<section class="panel"><div class="panel-head"><div><span class="section-kicker">${E(ML.campaign[c.status] || c.status)}</span><h2>${E(c.title)}</h2><p>Создана ${E(mlTime(c.created_at))}${c.started_at ? ` · запуск ${E(mlTime(c.started_at))}` : ''}</p></div><div class="toolbar">${controls}</div></div>
       ${c.stop_reason ? `<div class="inline-note ${c.status === 'stopped' ? 'error-note' : ''}">${E(c.stop_reason)}</div>` : ''}${goLive}<div id="ml-stats">${mailingStats(c)}</div></section>
     ${mailingBatchPanel(c)}
@@ -292,6 +296,31 @@ function mailingStats(c) {
     <div class="two-cols"><div><h3>Причины пропусков и ошибок</h3>${c.reasons.length ? `<table class="ml-table"><tbody>${c.reasons.map(r => `<tr><td>${E(ML.recipient[r.status] || r.status)}</td><td>${E(r.reason)}</td><td>${E(r.count)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Нет</p>'}</div>
     <div><h3>По аккаунтам</h3><table class="ml-table"><thead><tr><th>Аккаунт</th><th>Состояние</th><th>Отправлено</th><th>Осталось</th><th>Ошибки</th></tr></thead><tbody>${c.accounts.map(a => `<tr><td>${E(a.label)}${a.is_test ? ' · тест' : ''}</td><td>${E((ML.account[a.status] || [a.status])[0])}</td><td>${E(a.sent || 0)}</td><td>${E(a.left || 0)}</td><td>${E(a.errors || 0)}</td></tr>`).join('')}</tbody></table></div></div>
     <h3>События</h3>${c.events.length ? `<div class="list">${c.events.slice(0, 15).map(e => `<div class="row small"><span class="muted">${E(mlTime(e.at))}</span> ${E(e.message)}</div>`).join('')}</div>` : '<p class="muted">Событий нет</p>'}`;
+}
+
+// ------------------------------------------------------------ «Тесты»
+// The same scheme as for businesses (window 10–19 Moscow time, pauses, limits) from the test account to the
+// owner's own accounts, with texts of real leads. «Без ожидания» is only a quick delivery check.
+async function mailingTests(body, o) {
+  const rows = await call('mailing_tests');
+  const testAccounts = o.accounts.filter(a => a.is_test);
+  const ready = testAccounts.filter(a => a.status !== 'needs_login' && a.status !== 'quarantine');
+  const t = state.mailingTest ||= {count: 2, no_wait: false, account: ready[0] ? String(ready[0].id) : ''};
+  const campaigns = (await call('mailing_list')).filter(c => c.kind === 'test').slice(0, 8);
+  body.innerHTML = `<div class="detail-stack"><section class="panel"><span class="section-kicker">1 · КОМУ</span><h2>Тестовые адресаты</h2>
+      <p class="small muted">Ваши собственные аккаунты Telegram. Тестовые кампании пишут только им — настоящие бизнесы ничего не получат.</p>
+      <div class="list">${rows.length ? rows.map(r => `<div class="row small"><div class="row-head"><span class="row-title">${E(r.shown)}</span><button type="button" class="ghost" data-ml-test-remove="${r.index}">Убрать</button></div></div>`).join('') : '<p class="muted">Пока никого. Добавьте username своего второго аккаунта.</p>'}</div>
+      <form id="ml-test-add-form" class="ml-form"><div class="form-grid"><label class="field">Username или номер из контактов<input name="value" autocomplete="off" placeholder="@мой_второй_аккаунт"></label></div>
+        <div class="toolbar"><button class="btn">Добавить</button><button type="button" class="ghost" data-ml="import-file">Загрузить из файла…</button></div></form></section>
+    <section class="panel"><span class="section-kicker">2 · ОТКУДА</span><h2>Тестовый аккаунт</h2>
+      ${testAccounts.length ? `<div class="checkboxes">${testAccounts.map(a => `<label><input type="radio" name="ml-test-account" value="${a.id}" ${String(a.id) === t.account ? 'checked' : ''} ${a.status === 'needs_login' || a.status === 'quarantine' ? 'disabled' : ''}> ${E(a.label)} · ${E(a.phone_mask)} · ${E((ML.account[a.status] || [a.status])[0])}</label>`).join('')}</div>`
+        : '<p class="muted">Тестового аккаунта нет. Добавьте его во вкладке «Аккаунты» с галочкой «тестовый».</p>'}</section>
+    <section class="panel"><span class="section-kicker">3 · ТЕСТ</span><h2>Запустить тест</h2>
+      <p class="small muted">Берутся первые лиды из «Лидов» (текущая вкладка и фильтры): их настоящие тексты уйдут вашим тестовым адресатам. Окно отправки 10:00–19:00 по Москве, только будни, паузы и лимиты — как у бизнесов. Сначала будет сухой запуск: покажет, когда уйдёт каждое сообщение.</p>
+      <form id="ml-test-run-form" class="ml-form"><div class="form-grid"><label class="field">Сколько сообщений (1–5)<input name="count" type="number" min="1" max="5" value="${E(t.count)}"></label></div>
+        <label class="ml-no-wait"><input type="checkbox" name="no_wait" ${t.no_wait ? 'checked' : ''}> Без ожидания — только для быстрой проверки доставки: без окна 10–19 и пауз между сообщениями (дневные лимиты остаются)</label>
+        <div class="toolbar"><button class="btn primary" ${rows.length && ready.length ? '' : 'disabled'}>Создать тест — сухой запуск</button></div></form>
+      ${campaigns.length ? `<h3>Последние тесты</h3><div class="list">${campaigns.map(c => `<div class="row small"><div class="row-head"><div><span class="row-title">${E(c.title)}</span><div class="muted">${E(mlTime(c.created_at))} · ${c.mode === 'live' ? 'реальная отправка' : 'сухой запуск'} · ${E(ML.campaign[c.status] || c.status)}</div></div><button type="button" class="btn" data-ml-campaign="${c.id}">Открыть</button></div></div>`).join('')}</div>` : ''}</section></div>`;
 }
 
 // ------------------------------------------------------------ other tabs
@@ -363,11 +392,12 @@ document.addEventListener('click', event => {
   const b = event.target.closest('button');
   if (!b || state.view !== 'mailing') return;
   const d = b.dataset;
-  if (!(d.ml || d.mlTab || d.mlCampaign || d.mlLogin || d.mlLoginCancel || d.mlAccountStatus || d.mlLogout || d.mlStopRemove || d.mlMsgSave || d.mlMsgReset || d.mlExclude || d.mlInclude)) return;
+  if (!(d.ml || d.mlTab || d.mlCampaign || d.mlTestRemove !== undefined || d.mlLogin || d.mlLoginCancel || d.mlAccountStatus || d.mlLogout || d.mlStopRemove || d.mlMsgSave || d.mlMsgReset || d.mlExclude || d.mlInclude)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   safe(async () => {
     if (d.mlTab) { const form = document.querySelector('#ml-new-form'); if (form) mailingCollect(form); mlGo({mailingTab: d.mlTab, mailingCampaign: null}); return; }
     if (d.mlCampaign) { mlGo({mailingCampaign: Number(d.mlCampaign)}); return; }
+    if (d.mlTestRemove !== undefined) { await call('mailing_test_remove', Number(d.mlTestRemove)); toast('Тестовый адресат убран'); render(); return; }
     if (d.mlLogin) { await call('mailing_login_request', d.mlLogin); state.mailingLogin[d.mlLogin] = {step: 'code'}; toast('Код отправлен в Telegram на этот номер'); render(); return; }
     if (d.mlLoginCancel) { await call('mailing_login_cancel', d.mlLoginCancel); delete state.mailingLogin[d.mlLoginCancel]; render(); return; }
     if (d.mlAccountStatus) { if (d.confirm && !confirm(d.confirm)) return; await call('mailing_account_status', d.mlAccountStatus, d.status); render(); return; }
@@ -412,6 +442,21 @@ document.addEventListener('submit', event => {
     else if (f.id === 'ml-compose-form') { const payload = mailingComposeCollect(f); payload.template = await mailingComposeTemplate(payload); if (!confirm(`Запустить рассылку на ${payload.ids.length} лидов?`)) return; const c = await call('mailing_launch', payload); toast('Рассылка запущена', true); mlGo({mailingFromLeads: null, mailingTab: 'campaigns', mailingCampaign: c.id}); }
     else if (f.id === 'ml-new-form') { const c = await call('mailing_new', mailingCollect(f)); toast('Кампания создана в режиме сухого запуска'); state.mailingDraft.title = ''; mlGo({mailingTab: 'campaigns', mailingCampaign: c.id}); }
     else if (f.id === 'ml-live-form') { await call('mailing_go_live', state.mailingCampaign, x.get('confirm')); state.mailingConfirm = ''; toast('Реальная отправка включена. Нажмите «Начать отправку»', true); render(); }
+    else if (f.id === 'ml-test-add-form') { const r = await call('mailing_test_add', x.get('value')); toast(r.added ? 'Тестовый адресат добавлен' : 'Этот адресат уже в списке'); render(); }
+    else if (f.id === 'ml-test-run-form') {
+      const t = state.mailingTest; t.count = Math.min(5, Math.max(1, Number(x.get('count') || 2))); t.no_wait = x.get('no_wait') === 'on';
+      t.account = document.querySelector('[name=ml-test-account]:checked')?.value || t.account;
+      if (!t.account) { toast('Выберите тестовый аккаунт', true); return; }
+      const leads = JSON.parse(localStorage.getItem('lem-leads') || '{}');
+      const filters = {segment: leads.segment || 'new', q: leads.q || '', niche: leads.niche || '', city: leads.city || '', run: leads.run || '', site_type: leads.site_type || ''};
+      const ids = await mailingBatchIds(filters, t.count);
+      if (!ids.length) { toast('В «Лидах» нет лидов для теста', true); return; }
+      const c = await call('mailing_new', {title: `Тест · ${ids.length} ${ids.length === 1 ? 'сообщение' : 'сообщения'}${t.no_wait ? ' · без ожидания' : ''}`, filters: {ids}, template: 'auto',
+        accounts: [Number(t.account)], kind: 'test', limit: ids.length, no_wait: t.no_wait});
+      await call('mailing_run', c.id);
+      toast('Тест создан, сухой запуск готов — ничего не отправлено');
+      mlGo({mailingTab: 'campaigns', mailingCampaign: c.id});
+    }
     else if (f.id === 'ml-stop-form') { await call('mailing_stop_add', x.get('kind'), x.get('value')); toast('Добавлено в стоп-лист'); render(); }
     else if (f.id === 'ml-policy-form') { const values = Object.fromEntries([...x.entries()].filter(([k]) => k !== 'weekdays_only').map(([k, v]) => [k, Number(v)])); values.weekdays_only = x.get('weekdays_only') === 'on'; await call('mailing_policy_save', values); toast('Правила сохранены'); render(); }
   });

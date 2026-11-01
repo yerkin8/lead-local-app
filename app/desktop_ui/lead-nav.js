@@ -2,7 +2,8 @@
 (function (root) {
   const SITE_TYPES = { no_site: 'Без сайта', weak_site: 'Конструктор', unavailable: 'Сайт не работает', own_site: 'Свой сайт', other: 'Свой сайт' };
   const ROOT_VIEWS = ['leads', 'results', 'today', 'search', 'scripts', 'ai', 'mailing', 'media', 'settings'];
-  const BACK_LABELS = { leads: '← К лидам', today: '← К «Сегодня»', results: '← К итогам', search: '← К поиску' };
+  const BACK_LABELS = { leads: '← К лидам', today: '← К «Сегодня»', results: '← К итогам', search: '← К поиску',
+    mailing: '← К рассылке', media: '← К медиа' };
 
   // Neighbours of `id` in the current list order; null when it is not in the list or at an edge.
   function neighbours(ids, id) {
@@ -31,7 +32,27 @@
   }
   function writeFlag(key, on) { try { root.localStorage.setItem(key, on ? '1' : '0'); } catch (_) { /* storage off */ } }
 
-  const api = { SITE_TYPES, ROOT_VIEWS, neighbours, siteType, localTime, backVisible, backLabel, readFlag, writeFlag };
+  // A link for people: «WhatsApp · +7 900 …» instead of a raw wa.me/…?text=%D0… URL.
+  function linkView(url, label) {
+    const raw = String(url || '');
+    let parsed = null;
+    try { parsed = new URL(/^[a-z]+:/i.test(raw) ? raw : 'https://' + raw); } catch (_) { return { label: label || 'Ссылка', text: raw }; }
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    const digits = (s) => String(s || '').replace(/\D/g, '');
+    const phone = (d) => d.length === 11 && d[0] === '7' ? `+7 ${d.slice(1, 4)} ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9)}` : '+' + d;
+    if (host === 'wa.me' || host === 'api.whatsapp.com') {
+      const d = digits(host === 'wa.me' ? parsed.pathname : parsed.searchParams.get('phone'));
+      return { label: 'WhatsApp', text: d.length >= 10 ? phone(d) : 'чат' };
+    }
+    if (parsed.protocol === 'viber:') return { label: 'Viber', text: phone(digits(parsed.searchParams.get('number'))) };
+    if (host === 't.me' || host === 'telegram.me') return { label: 'Telegram', text: '@' + parsed.pathname.replace(/^\/+|\/+$/g, '') };
+    let path = parsed.pathname.replace(/\/+$/, '');
+    try { path = decodeURIComponent(path); } catch (_) { /* keep encoded */ }
+    const names = { 'vk.com': 'ВКонтакте', 'ok.ru': 'Одноклассники', 'instagram.com': 'Instagram', 'youtube.com': 'YouTube', 'dzen.ru': 'Дзен' };
+    return { label: label && !/^https?:/i.test(label) && label !== host ? label : (names[host] || 'Сайт'), text: host + path };
+  }
+
+  const api = { SITE_TYPES, linkView, ROOT_VIEWS, neighbours, siteType, localTime, backVisible, backLabel, readFlag, writeFlag };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.LeadNav = api;
 })(typeof window !== 'undefined' ? window : globalThis);

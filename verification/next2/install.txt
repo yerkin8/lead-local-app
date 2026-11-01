@@ -1,0 +1,19 @@
+Установка сборки next2 — 02.11.2026 (с согласия владельца: «then build and install»)
+
+Ссылки: живая проверка показала, что у получателя все три вида ссылок — обычный текст (Telegram не делает
+кликабельными ссылки от не-контактов, сторона получателя). Решение N29: ссылок в исходящих сообщениях нет.
+
+Сборка: build.ps1 → dist\LeadEqualMoney. verify.ps1 — PASS, обход окна — PASSED.
+Скан утечек (scripts\mailing_leak_scan.py --known secrets\accounts.json) по dist, docs/next, verification/next2:
+  scanned_files=902 known_values=5 findings=0.
+Приложение было закрыто. Резервная копия: Documents\backups\LeadEqualMoney-pre-next2-20261102-022530\
+  roaming\ (362 файла, 104 879 660 байт — совпадает с источником), desktop-build\ — прежняя сборка.
+Установка: Desktop\LeadEqualMoney — новая сборка + ПРОЧТИ.txt, «Создать ярлык.cmd», create_shortcut.ps1;
+  exe совпадает с собранным (SHA-256). Прежняя папка перенесена в %TEMP%\claude\lem-old-desktop-build-next2.
+Запуск на реальных данных (scripts\unify_real_switch.py): открываются все разделы, ошибок нет, закрыто штатно.
+Сверка до/после (только чтение):
+  app.sqlite3: integrity ok; миграции 1,2,3,4,7 → +8 (пустая manual_contacts); прочие строки и статусы лидов совпадают;
+    автокопия перед миграцией: backups\app-pre-schema-v8-*.sqlite3.
+  mailing.sqlite3: integrity ok; схема 1 → 2 (колонка campaigns.no_wait), строки без изменений;
+    автокопия: backups\mailing-pre-schema-v2-*.sqlite3.
+Откат: закрыть приложение; вернуть roaming\ в %APPDATA%\LeadEqualMoney и desktop-build\ на рабочий стол.

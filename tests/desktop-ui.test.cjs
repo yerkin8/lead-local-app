@@ -47,7 +47,8 @@ test('«База» and «Панель» are gone; the card belongs to «Лиды
   for (const file of ['app.js', 'flows.js', 'stage9.js', 'leads.js', 'today.js']) {
     assert.doesNotMatch(read(file), /baseLevel|glassFolderCards|data-nav="(dashboard|businesses)"|\['(dashboard|businesses)', '/, file);
   }
-  assert.match(read('desk-shell.js'), /detail: 'leads', telegram: 'leads'/);
+  assert.match(read('desk-shell.js'), /lead: 'leads', telegram: 'leads'/);
+  for (const file of ['app.js', 'stage9.js', 'flows.js', 'leads.js']) assert.doesNotMatch(read(file), /setView\('detail'|state\.view==='detail'/);
 });
 
 test('form rows keep one control height and a common top (redesign 06 layout guard)', () => {

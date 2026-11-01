@@ -8,6 +8,7 @@ import secrets
 from datetime import datetime, timezone
 
 from . import gateway as gw
+from .entities import parse as parse_entities
 from .gateway import GatewayError, IncomingHandler, LoginStep, Peer, SentMessage, TelegramGateway
 from .logsafe import get_logger
 
@@ -223,9 +224,14 @@ class TelethonGateway(TelegramGateway):
         from telethon.tl.functions.messages import SendMessageRequest
         from telethon.tl.types import InputPeerUser
 
+        from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
+
         client = self._require(account_id)
-        request = SendMessageRequest(InputPeerUser(peer.user_id, peer.access_hash), text,
-                                     no_webpage=True, random_id=random_id)
+        plain, found = parse_entities(text)
+        entities = [MessageEntityTextUrl(e.offset, e.length, e.url) if e.kind == "text_url"
+                    else MessageEntityUrl(e.offset, e.length) for e in found]
+        request = SendMessageRequest(InputPeerUser(peer.user_id, peer.access_hash), plain,
+                                     no_webpage=True, random_id=random_id, entities=entities or None)
         result = await self._guard(client(request))
         return SentMessage(*_message_id(result, random_id), type(result).__name__)
 
@@ -235,9 +241,17 @@ class TelethonGateway(TelegramGateway):
         client = self._require(account_id)
         messages = await self._guard(client.get_messages(InputPeerUser(peer.user_id, peer.access_hash), limit=20))
         for message in messages:
-            if message.out and (message.message or "") == text and message.date >= since:
+            if message.out and (message.message or "") == parse_entities(text)[0] and message.date >= since:
                 return int(message.id)
         return None
+
+    async def incoming_after(self, account_id, peer, after_msg_id):
+        from telethon.tl.types import InputPeerUser
+
+        client = self._require(account_id)
+        messages = await self._guard(client.get_messages(InputPeerUser(peer.user_id, peer.access_hash),
+                                                         limit=50, min_id=int(after_msg_id or 0)))
+        return sorted((int(item.id), item.message or "") for item in messages if not item.out)
 
     def set_incoming_handler(self, handler):
         self._handler = handler

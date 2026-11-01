@@ -124,7 +124,7 @@ def next_checks(window):
     js(window, f'setView("mailing", {{mailingCampaign: {campaign["id"]}}})'); time.sleep(2)
     wait(window, 'document.querySelector("#ml-repeat-form")', 8)
     page = js(window, 'document.querySelector("#content").innerText') or ""
-    check("mailing_batch_results_per_business", "Бизнесы пачки и результат" in page and "Сухой запуск: ушло бы" in page,
+    check("mailing_batch_results_per_business", "Бизнесы пачки и результат" in page and "Сухой запуск" in page and "Уйдёт" in page,
           page[:300])
     check("mailing_lead_status_shown", "В «Лидах»: Ответили" in page)
     check("mailing_exclude_buttons", js(window, 'document.querySelectorAll("[data-ml-exclude]").length') == len(ids))
@@ -147,6 +147,12 @@ def next_checks(window):
     check("mailing_batch_lists_both", page.count("сухой запуск") >= 2 and "напоминание" in page)
     js(window, 'document.querySelector("#ml-repeat").previousElementSibling.scrollIntoView()'); time.sleep(0.5)
     capture("mailing-repeat.png")
+    js(window, f'document.querySelector("#ml-recipients [data-open]")?.click()'); time.sleep(1.5)
+    check("mailing_opens_lead_card", js(window, "state.view") == "lead", js(window, "state.view"))
+    check("back_named_to_mailing", js(window, 'document.querySelector("#app-back")?.textContent') == "← К рассылке")
+    js(window, 'setView("mailing", {mailingCampaign: null, mailingTab: "tests"})'); time.sleep(1.5)
+    check("mailing_tests_tab", js(window, 'Boolean(document.querySelector("#ml-test-add-form") && document.querySelector("#ml-test-run-form [name=no_wait]"))'))
+    check("one_scrollbar_mailing", js(window, 'document.scrollingElement.scrollHeight <= innerHeight'))
 
 
 def tour(window):
@@ -201,20 +207,26 @@ def tour(window):
         groups = js(window, 'document.querySelectorAll("#content details").length')
         check("scripts_grouped_by_category", groups >= 7, groups)
 
-        # Card from «Лиды»: lead → «Старый вид карточки» → detail; «Назад» returns, the sidebar stays on «Лиды».
+        # Card from «Лиды»: one lead card with everything; «Назад» returns, the sidebar stays on «Лиды».
         js(window, 'document.querySelector(".sidebar [data-view=leads]").click()'); time.sleep(1.5)
         js(window, 'state.navigation=[]')
+        check("leads_has_add_lead", js(window, 'Boolean(document.querySelector("[data-lead-add]") && document.querySelector("[data-phones-refill]"))'))
+        js(window, 'document.querySelector("[data-lead-add]")?.click()'); time.sleep(0.6)
+        check("add_lead_sheet_opens", js(window, 'Boolean(document.querySelector("#lead-add-form [name=url]"))'))
+        js(window, 'document.querySelector(".lead-sheet")?.remove()')
         wait(window, 'document.querySelector("[data-lead-open]")', 5)
         js(window, 'document.querySelector("[data-lead-open]")?.click()'); time.sleep(1.5)
-        wait(window, 'document.querySelector("[data-menu=old]")', 5)
-        js(window, 'document.querySelector("[data-menu=old]")?.click()'); time.sleep(1.5)
-        check("leads_opens_card", js(window, "state.view") == "detail", js(window, "state.view"))
+        check("leads_opens_card", js(window, "state.view") == "lead", js(window, "state.view"))
+        check("card_has_moved_actions", js(window, 'Boolean(document.querySelector("[data-lead-refresh]") && document.querySelector("[data-today-add]") && document.querySelector("#content [data-media]") && document.querySelector("[data-contact-add=phone]") && document.querySelector("[data-contact-add=link]"))'))
+        check("no_old_card_link", js(window, '!document.querySelector("[data-menu=old]")'))
+        check("one_scrollbar", js(window, 'document.scrollingElement.scrollHeight <= innerHeight'),
+              js(window, '[document.scrollingElement.scrollHeight, innerHeight]'))
         js(window, 'document.querySelector("[data-today-add]")?.click()'); time.sleep(1.2)  # queue it for «Сегодня»
         capture("card.png")
         offers = js(window, '[...document.querySelectorAll("[data-offer]")].map(x=>x.dataset.offer).join(",")')
         check("card_four_offers", offers.split(",") == ["site", "landing", "bot", "promotion"], offers)
         check("card_copy_buttons", js(window, 'document.querySelectorAll("[data-copy-offer]").length') == 4)
-        check("card_status_call", js(window, '[...document.querySelectorAll("select option")].some(o=>o.value==="call")'))
+        check("card_status_call", js(window, 'Boolean(document.querySelector("[data-lead-set-status=call]"))'))
         check("card_no_notes", js(window, '!document.querySelector("#business-note,[name=note],#lead-note")'))
         check("sidebar_on_card_is_leads", js(window, 'document.querySelector(".sidebar nav button.active")?.dataset.view') == "leads")
 
@@ -245,7 +257,8 @@ def tour(window):
         capture("today-ack.png")
         has_today = wait(window, 'document.querySelector("#content button[data-open]")', 5)
         js(window, 'document.querySelector("#content button[data-open]")?.click()'); time.sleep(1.5)
-        check("today_opens_card", has_today and js(window, "state.view") == "detail", js(window, "state.view"))
+        check("today_opens_card", has_today and js(window, "state.view") == "lead", js(window, "state.view"))
+        check("back_named_to_today", js(window, 'document.querySelector("#app-back")?.textContent') == "← К «Сегодня»")
         capture("card-from-today.png")
         js(window, 'document.querySelector("#app-back")?.click()'); time.sleep(1.2)
         check("back_from_card_to_today", js(window, "state.view") == "today", js(window, "state.view"))

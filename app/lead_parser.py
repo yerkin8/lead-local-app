@@ -25,6 +25,7 @@ from .config import DATA_DIR
 from .driver_registry import register as register_driver, quit_driver
 from .domain import classify_site, host_of, is_social, normalized, org_id
 from .errors import YandexBlocked
+from .phone_links import merge_phones, messenger_phones
 from .yandex_urls import normalize_yandex_url
 
 
@@ -36,6 +37,17 @@ with SELECTORS_PATH.open("r", encoding="utf-8") as _selectors_file:
 
 class SearchStopped(RuntimeError):
     pass
+
+
+class SearchInterrupted(RuntimeError):
+    """Too many pages failed in a row: the search is cut, its status must not be «Готово»."""
+
+
+class PageFailed(RuntimeError):
+    """One page did not load (network error, HTTP 404/5xx). Not a stop: the card is skipped and counted."""
+
+
+MAX_FAILED_IN_ROW = 6  # this many failed pages in a row = no connection; the search stops as «Прервано»
 
 
 class SearchBlocked(SearchStopped, YandexBlocked):
@@ -411,6 +423,42 @@ def apply_site_check(row: dict, html: str | None, failed: bool) -> dict:
     return row
 
 
+def card_state(soup) -> dict:
+    """The organization from the card page state JSON (``script.state-view``): every phone, the real
+    number of text reviews and the number of photos are there, the HTML shows only part of it."""
+    node = soup.select_one(SELECTORS["search"].get("state_json", "script.state-view"))
+    if not node:
+        return {}
+    try:
+        data = json.loads(node.string or node.get_text())
+    except (TypeError, ValueError):
+        return {}
+    for entry in (data.get("stack") or []) if isinstance(data, dict) else []:
+        items = ((entry or {}).get("results") or {}).get("items") if isinstance(entry, dict) else None
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return items[0]
+    return {}
+
+
+def _state_int(value) -> int | None:
+    try:
+        return max(0, int(value)) if value is not None and str(value).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def card_phones(soup, state: dict) -> list[str]:
+    """HTML ∪ state JSON ∪ WhatsApp/Viber links, in the order the card shows them, each number once."""
+    shown = _selector_texts(soup, SELECTORS["organization"]["phones"])
+    from_state = []
+    for item in state.get("phones") or []:
+        if isinstance(item, dict):
+            from_state.append(item.get("number") or item.get("value") or "")
+    hrefs = [a.get("href", "") for a in soup.select("a[href]")]
+    hrefs += [item.get("href", "") for item in state.get("socialLinks") or [] if isinstance(item, dict)]
+    return merge_phones(shown, from_state, messenger_phones(hrefs))
+
+
 def parse_org_html(url: str, page: str, review_limit: int = 100, *, check_site: bool = True) -> dict:
     """Card fields. ``check_site=False`` leaves a pending site check to the caller
     (``site_needs_check`` / ``apply_site_check``) so sites can be checked in parallel."""
@@ -439,19 +487,32 @@ def parse_org_html(url: str, page: str, review_limit: int = 100, *, check_site: 
     gallery_links = soup.select(selectors["gallery_link"])
     gallery_url = urljoin(url, gallery_links[0].get("href", "")) if gallery_links else url.rstrip("/") + "/gallery/"
     links = _profile_links(site, socials, structured_links + _contact_links(soup))
-    photo_count = max(0, int(details["photo_count"])) if details.get("photo_count") is not None else None
+    state = card_state(soup)
+    # «Отзывы» = text reviews (reviewCount), not the number of ratings; the HTML counter is the fallback.
+    reviews = _state_int((state.get("ratingData") or {}).get("reviewCount"))
+    if reviews is None:
+        reviews = review_count(_selector_text(soup, selectors["review_count"]))
+    photo_count = _state_int((state.get("photos") or {}).get("count") if isinstance(state.get("photos"), dict) else None)
+    if photo_count is None and details.get("photo_count") is not None:
+        photo_count = max(0, int(details["photo_count"]))
     return {
         "id": org_id(url), "name": _selector_text(soup, selectors["name"]) or "Без названия",
         "category": ", ".join(categories[:3]) if categories else None,
-        "phones": _selector_texts(soup, selectors["phones"]),
+        "phones": card_phones(soup, state),
         "socials": socials, "website": site, "site_type": site_type,
         "site_engine": engine, "rating": number(_selector_text(soup, selectors["rating"])),
-        "reviews": review_count(_selector_text(soup, selectors["review_count"])),
+        "reviews": reviews,
         "address": _selector_text(soup, selectors["address"]), "map_url": normalize_yandex_url(url),
         "details": {**details, "photo_count": photo_count},
         "review_items": extract_review_items(page, review_limit),
         "links": links, "hours": hours, "features": features,
         "review_url": review_url, "gallery_url": gallery_url,
+        # For «Добавить лида»: city and country from the structured address, niche from the first rubric.
+        "city": str(((state.get("compositeAddress") or {}).get("locality")) or "").strip(),
+        "country": str(((state.get("compositeAddress") or {}).get("country")) or "").strip(),
+        "niche": (categories[0] if categories else next(
+            (str(item.get("name") or "") for item in state.get("categories") or [] if isinstance(item, dict)),
+            "")).casefold(),
     }
 
 
@@ -681,13 +742,13 @@ def request_page(session: requests.Session, url: str) -> tuple[str, str]:
     try:
         response = session.get(localized_url(url), timeout=(5, 25))
     except requests.RequestException as exc:
-        raise SearchStopped(f"Не удалось загрузить Яндекс.Карты: {type(exc).__name__}") from None
+        raise PageFailed(f"Не удалось загрузить Яндекс.Карты: {type(exc).__name__}") from None
     body = response.text
     plain = BeautifulSoup(body[:20000], "html.parser").get_text(" ", strip=True).casefold()
     if response.status_code in {403, 429} or plain == "limited" or "showcaptcha" in response.url.lower():
         raise SearchBlocked("Яндекс временно ограничил запросы или показал капчу")
     if response.status_code >= 400:
-        raise SearchStopped(f"Яндекс.Карты вернули HTTP {response.status_code}")
+        raise PageFailed(f"Яндекс.Карты вернули HTTP {response.status_code}")
     return response.url, body
 
 
@@ -780,19 +841,15 @@ def _site_check(site: str) -> tuple[str | None, bool]:
 
 
 def _detail_phase(job: dict, session: requests.Session, review_limit: int, progress, timing: _Timing) -> None:
-    """Pass 2: reviews and photo count for the cards found by this job. Cards are already in «Лиды»."""
-    items = db.job_detail_items(job["id"], review_limit)
+    """Pass 2: reviews for the cards found by this job and for cards of earlier runs of the same search
+    whose reviews were cut by a captcha or an error (E-S-12). The photo count comes from the card JSON:
+    no gallery page is requested (E-S-08). Cards are already in «Лиды»."""
+    items = db.job_detail_items(job["id"], review_limit, db.search_key(job["params"]))
     for index, item in enumerate(items, start=1):
         cancel.check()
         progress(phase="details", details_done=index - 1, details_total=len(items))
         base = str(item["map_url"]).rstrip("/") + "/"
         try:
-            if item.get("photo_count") is None:
-                started = time.perf_counter()
-                photo_count = collect_gallery_photo_count_http(session, base + "gallery/")
-                timing.add("gallery", started)
-                if photo_count is not None:
-                    db.set_business_photo_count(item["id"], photo_count)
             if review_limit and item.get("needs_reviews"):
                 started = time.perf_counter()
                 collect_reviews_http(session, base + "reviews/", item["id"], review_limit)
@@ -822,7 +879,8 @@ def run_search_http(job: dict) -> dict:
     checked = db.checked_ids(search_key)
     seen_orgs, seen_pages = set(), set()
     matched = db.job_result_count(job["id"]) if desktop_details else 0
-    counters = {"scanned": 0, "skipped": 0, "skipped_checked": 0, "errors": 0}
+    counters = {"scanned": 0, "skipped": 0, "skipped_checked": 0, "errors": 0, "other_city": 0,
+                "failed_in_row": 0}
     empty_queries = 0
     timing = _Timing()
     started_at = time.monotonic()
@@ -857,6 +915,8 @@ def run_search_http(job: dict) -> dict:
         nonlocal matched
         if row["id"] and fits(row, params):
             address = normalized(row.get("address") or "")
+            if address and normalized(params["city"]) not in address:
+                counters["other_city"] += 1
             if not address or normalized(params["city"]) in address:
                 tag = (params["niche"], params["country"], params["city"])
                 started = time.perf_counter()
@@ -902,7 +962,16 @@ def run_search_http(job: dict) -> dict:
                     continue
                 seen_pages.add(page_url)
                 started = time.perf_counter()
-                actual_url, body = request_page(session, page_url)
+                try:
+                    actual_url, body = request_page(session, page_url)
+                except PageFailed as exc:
+                    counters["errors"] += 1
+                    counters["failed_in_row"] += 1
+                    _log_parser_event(logging.WARNING, "search_page_failed", error=str(exc))
+                    progress(last_error=str(exc))
+                    if counters["failed_in_row"] >= MAX_FAILED_IN_ROW:
+                        raise SearchInterrupted(str(exc)) from None
+                    continue
                 soup = BeautifulSoup(body, "html.parser")
                 links, next_pages = http_search_links(actual_url, soup)
                 timing.add("search_page", started)
@@ -940,6 +1009,7 @@ def run_search_http(job: dict) -> dict:
                         started = time.perf_counter()
                         row = parse_org_html(url, card_html, review_limit, check_site=False)
                         timing.add("card_parse", started)
+                        counters["failed_in_row"] = 0
                         if site_needs_check(row) and might_fit(row):
                             pending.append((url, row, pool.submit(_site_check, row["website"])))
                         else:
@@ -947,7 +1017,13 @@ def run_search_http(job: dict) -> dict:
                     except SearchStopped:
                         raise
                     except Exception as exc:
+                        # One card that does not load or parse is skipped, the search goes on (E-S-11).
                         counters["errors"] += 1
+                        if isinstance(exc, PageFailed):
+                            counters["failed_in_row"] += 1
+                            if counters["failed_in_row"] >= MAX_FAILED_IN_ROW:
+                                raise SearchInterrupted(
+                                    f"{exc}. Подряд не загрузилось страниц: {MAX_FAILED_IN_ROW}") from None
                         if desktop_details:
                             try:
                                 save_failed_card_html(url, card_html, exc)
@@ -969,6 +1045,8 @@ def run_search_http(job: dict) -> dict:
             progress()
         if desktop_details:
             _detail_phase(job, session, review_limit, progress, timing)
+    except SearchInterrupted as exc:
+        return result(f"Поиск прерван: {exc}. Найденное сохранено, запустите поиск ещё раз", interrupted=True)
     except SearchStopped as exc:
         return result(str(exc), blocked=isinstance(exc, YandexBlocked))
     finally:
@@ -984,6 +1062,9 @@ def run_search_http(job: dict) -> dict:
         reason = "Достигнут лимит страниц выдачи"
     elif counters["scanned"] == 0 and empty_queries >= len(queries):
         reason = "Яндекс не нашёл организаций по запросу. Проверьте написание города и ниши"
+    elif not matched and counters["other_city"] and counters["other_city"] * 2 >= counters["scanned"]:
+        reason = (f"Ни одна из {counters['scanned']} карточек не из города «{params['city']}» — "
+                  "проверьте написание города")
     else:
         reason = "По этим запросам Яндекс больше не показал новых карточек"
     return result(_with_threshold_hint(reason, matched, params))

@@ -11,7 +11,8 @@ from contextvars import ContextVar
 from typing import Callable
 
 from . import ai_scripts, db, leads, media_service, outreach
-from .desktop_services import refresh_business, search_results, start_desktop_search, stop_job
+from .desktop_services import (add_lead_by_link, card_job, refill_phones, refresh_business, search_results,
+                               start_desktop_search, stop_job)
 from .domain import COUNTRIES, SITE_TYPES, STATUSES
 from .phone_links import build_telegram_phone_links
 
@@ -175,6 +176,32 @@ def frontend_error(message, source="", line=0, column=0):
 
 def business_refresh(identity):
     return refresh_business(str(identity))
+
+
+def lead_add(url, niche="", city=""):
+    return add_lead_by_link(str(url or ""), str(niche or ""), str(city or ""))
+
+
+def phones_refill(ids=None):
+    return refill_phones(list(ids) if ids else None)
+
+
+def cards_job(job_id):
+    return card_job(str(job_id))
+
+
+def cards_stop(job_id):
+    return stop_job(str(job_id))
+
+
+def lead_contact_add(business_id, kind, value, label=""):
+    return db.add_manual_contact(str(business_id), str(kind), str(value or ""), str(label or ""))
+
+
+def lead_contact_delete(contact_id):
+    if not db.delete_manual_contact(int(contact_id)):
+        raise ValueError("Контакт не найден")
+    return {"deleted": True}
 
 
 def debug_html_enabled():
@@ -356,12 +383,14 @@ SERVICES: dict[str, Callable] = {fn.__name__: fn for fn in (
     telegram_phone_links, outreach_today, outreach_add, outreach_prepare, outreach_mark,
     outreach_settings, outreach_settings_save, outreach_ack, outreach_contacted,
     leads_list, leads_filters, lead_card, lead_write, lead_mark,
+    lead_add, phones_refill, cards_job, cards_stop, lead_contact_add, lead_contact_delete,
     lead_correct, lead_status, leads_hide, leads_restore, leads_bulk_status, leads_summary,
 )}
 
 # Methods the web RPC may call. Excluded ones either need the PC (dialogs, files)
 # or start Chrome inside the request; on a 2 GB VPS that must go through the worker (phase 3).
-WEB_EXCLUDED = {"business_refresh", "media_discover_sections", "ai_key_save", "ai_key_clear"}
+WEB_EXCLUDED = {"business_refresh", "media_discover_sections", "ai_key_save", "ai_key_clear",
+                "lead_add", "phones_refill", "cards_job", "cards_stop"}
 WEB_METHODS = frozenset(set(SERVICES) - WEB_EXCLUDED)
 
 # Bridge methods with no web counterpart yet; tracked in docs/PARITY.md.

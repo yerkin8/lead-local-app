@@ -179,8 +179,9 @@ def main() -> int:
         errors.append("Visible keyboard focus styling is missing")
 
     accessible_fragments = [
-        (flows_text, 'aria-labelledby="telegram-links-title"', "telegram phone links panel"),
-        (flows_text, 'data-show-telegram-links', "telegram phone links action"),
+        # The lead card (one card everywhere, next2): labelled action bar and «Telegram по номеру» rows.
+        ((ROOT / "app/desktop_ui/leads.js").read_text(encoding="utf-8"), 'aria-label="Действия с лидом"', "lead card action bar"),
+        ((ROOT / "app/desktop_ui/leads.js").read_text(encoding="utf-8"), "'Telegram по номеру'", "telegram phone links in the lead card"),
     ]
     for text, fragment, label in accessible_fragments:
         if fragment not in text:

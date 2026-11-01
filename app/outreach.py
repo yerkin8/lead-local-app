@@ -163,7 +163,8 @@ def _dead(conn, business_id: str) -> set[str]:
 
 
 def _with_footer(message: str) -> str:
-    message = str(message or "").strip()
+    from .domain import strip_links
+    message = strip_links(message)   # no links in outgoing messages (docs/next/DECISIONS.md N29)
     if OPT_OUT_FOOTER.casefold() in message.casefold():
         return message
     return f"{message}\n\n{OPT_OUT_FOOTER}"
