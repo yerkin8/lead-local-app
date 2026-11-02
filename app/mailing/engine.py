@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from typing import Awaitable, Callable
 
 from . import gateway as gw
+from .entities import drop_footer
 from .gateway import GatewayError, Peer, TelegramGateway
 from .logsafe import get_logger, scrub
 from .policy import DEFAULT_TZ, Policy, zone
@@ -520,7 +521,9 @@ class Engine:
             # Outcome of an earlier send is unknown (crash, cancel, lost answer). Check first.
             since = parse(attempt["started_at"]) - timedelta(seconds=30)
             try:
-                found = await self.gateway.find_outgoing(account_id, peer, recipient["message"], since)
+                # A message sent before N30 still has the «СТОП» line: look for both forms.
+                found = (await self.gateway.find_outgoing(account_id, peer, drop_footer(recipient["message"]), since)
+                         or await self.gateway.find_outgoing(account_id, peer, recipient["message"], since))
             except GatewayError as error:
                 await self._handle_recipient_error(campaign, account_id, recipient, attempt["id"], error)
                 return
@@ -560,7 +563,7 @@ class Engine:
                 conn.execute("UPDATE accounts SET first_send_day=COALESCE(first_send_day,?) WHERE id=?",
                              (local_day(self.clock()).isoformat(), account_id))
         try:
-            sent = await self.gateway.send_message(account_id, peer, recipient["message"], random_id)
+            sent = await self.gateway.send_message(account_id, peer, drop_footer(recipient["message"]), random_id)
         except GatewayError as error:
             if error.kind == gw.DUPLICATE:
                 self._finish_sent(recipient, attempt_id, None, "RANDOM_ID_DUPLICATE: уже доставлено")

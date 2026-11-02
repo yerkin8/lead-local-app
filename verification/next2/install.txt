@@ -17,3 +17,12 @@
   mailing.sqlite3: integrity ok; схема 1 → 2 (колонка campaigns.no_wait), строки без изменений;
     автокопия: backups\mailing-pre-schema-v2-*.sqlite3.
 Откат: закрыть приложение; вернуть roaming\ в %APPDATA%\LeadEqualMoney и desktop-build\ на рабочий стол.
+
+Повторная установка 02.11.2026 03:10 — без строки «СТОП» в рассылке (N30), с согласия владельца.
+verify.ps1 — PASS; скан утечек dist + docs/next: scanned_files=901 findings=0.
+Приложение закрыто владельцем. Резервная копия: Documents\backups\LeadEqualMoney-pre-nostop-full-20261102-025656\
+  (364 файла, 105 796 210 байт — совпадает). Папка ...-pre-nostop-<время> без «full» неполная (снята при открытом
+  приложении), на неё не опираться.
+Установка: exe совпадает с собранным (SHA-256); прежняя папка — %TEMP%\claude\lem-old-desktop-build-nostop.
+Запуск на реальных данных: 12/12 проверок, закрыто штатно. Сверка до/после: обе базы integrity ok, строки и статусы
+лидов без изменений, миграций нет.

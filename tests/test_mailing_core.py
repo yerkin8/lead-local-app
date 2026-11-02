@@ -111,7 +111,7 @@ class DryRunTests(MailingCase):
         self.assertEqual([c for c in self.fake.calls if c[0] in ("send", "resolve")], [])
         self.assertTrue(all("Уйдёт" in r["reason"] for r in result["recipients"]))
         self.assertIn("Организация 1", result["recipients"][0]["message"])
-        self.assertIn("СТОП", result["recipients"][0]["message"])
+        self.assertNotIn("СТОП", result["recipients"][0]["message"])   # no opt-out line (N30)
 
     def test_live_requires_confirm_word(self):
         account = self.account()
@@ -616,7 +616,7 @@ class FromLeadsTests(MailingCase):
         with self.assertRaises(ValueError):
             self.service.set_message(campaign["id"], first["id"], "   ")
         edited = self.service.set_message(campaign["id"], first["id"], "Личный текст для первой")
-        self.assertIn("СТОП", edited["message"])
+        self.assertNotIn("СТОП", edited["message"])
         self.service.set_message(campaign["id"], second["id"], "Временный текст")
         reset = self.service.reset_message(campaign["id"], second["id"])
         self.assertEqual(reset["message"], second["message"])

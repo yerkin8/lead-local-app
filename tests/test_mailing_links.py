@@ -53,3 +53,19 @@ class SendWithLinksTests(MailingCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoOptOutLineTests(MailingCase):
+    """N30: mailing messages go without «Если сообщение неактуально, ответьте «СТОП»…»."""
+
+    def test_old_queued_message_is_sent_without_the_line_and_stop_still_works(self):
+        account = self.account()
+        campaign = self.service.create_campaign("Т", {"ids": ["b1"]}, "Здравствуйте, {название}!", [account])
+        with self.service.store.tx() as conn:   # queued before the change: the line is in the stored text
+            conn.execute("UPDATE recipients SET message=message||? WHERE campaign_id=?",
+                         ("\n\nЕсли сообщение неактуально, ответьте «СТОП» — больше писать не буду.", campaign["id"]))
+        self.live(campaign["id"])
+        self.assertEqual(self.fake.delivered[0].text, "Здравствуйте, Организация 1!")
+        import asyncio
+        asyncio.run(self.fake.reply(account, self.fake.delivered[0].user_id, "стоп"))
+        self.assertIn("b1", self.service.store.stop_set()["business"])

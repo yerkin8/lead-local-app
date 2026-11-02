@@ -15,7 +15,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from . import gateway as gw
-from .entities import strip_markdown_links
+from .entities import drop_footer, strip_markdown_links
 from .engine import REPEAT_SKIP_STATUSES, Credentials, Engine
 from .gateway import GatewayError, TelegramGateway
 from .logsafe import get_logger, mask_digits, scrub
@@ -77,7 +77,9 @@ def phone_keys(business: dict) -> list[str]:
 def with_footer(text: str) -> str:
     from ..domain import strip_links
     text = strip_links(text)   # no links in outgoing messages (docs/next/DECISIONS.md N29)
-    return text if OPT_OUT_FOOTER.casefold() in text.casefold() else f"{text}\n\n{OPT_OUT_FOOTER}"
+    # The owner's choice (02.11): mailing messages go without the «СТОП» line (N30). A «стоп» reply still
+    # puts the business in the stop-list. The name stays for the callers.
+    return drop_footer(text)
 
 
 class MailingService:

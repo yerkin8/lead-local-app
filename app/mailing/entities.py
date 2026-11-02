@@ -23,6 +23,14 @@ class Entity:
     url: str = ""
 
 
+OPT_OUT_LINE = re.compile(r"\s*Если сообщение неактуально, ответьте «СТОП» — больше писать не буду\.?[ \t]*", re.I)
+
+
+def drop_footer(text: str) -> str:
+    """Mailing messages go without the «СТОП» line, also those queued before this change (N30)."""
+    return OPT_OUT_LINE.sub("", str(text or "")).strip()
+
+
 def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 

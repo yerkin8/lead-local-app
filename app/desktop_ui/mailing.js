@@ -128,7 +128,7 @@ async function mailingNew(node, o) {
     <section class="panel"><span class="section-kicker">3 · СООБЩЕНИЕ</span><h2>Текст</h2>
       <div class="toolbar"><select id="ml-script" aria-label="Подсказка скрипта">${scripts.items.map(s => `<option value="${E(s.slug)}" ${s.slug === scripts.preferred ? 'selected' : ''}>${E(s.title)}${s.slug === scripts.preferred ? ' · подходит к типу сайта' : ''}</option>`).join('')}</select><button type="button" class="btn" data-ml="use-script">Подставить подсказку</button></div>
       <label class="field">Шаблон<textarea name="template" rows="8" placeholder="Здравствуйте! Посмотрел карточку {название} в {город}…">${E(d.template)}</textarea></label>
-      <p class="small muted">Переменные: {название}, {город}, {ниша}, {тип_сайта}. Поля в [квадратных скобках] нужно заменить — с ними кампания не создаётся. Строка про «СТОП» добавляется автоматически.</p>
+      <p class="small muted">Переменные: {название}, {город}, {ниша}, {тип_сайта}. Поля в [квадратных скобках] нужно заменить — с ними кампания не создаётся.</p>
       <div class="toolbar"><button type="button" class="btn" data-ml="preview">Предпросмотр на 3 записях</button><button class="btn primary">Создать — сухой запуск</button><button type="button" class="ghost" data-ml-tab="campaigns">Отмена</button></div>
       <div id="ml-preview"></div></section></form>`;
 }
@@ -176,7 +176,7 @@ async function mailingCompose(node, o) {
   node.innerHTML = `${mlEmergency(o)}<form id="ml-compose-form" class="detail-stack"><section class="panel"><span class="section-kicker">ПАЧКА ИЗ «ЛИДОВ»</span><h2>${E(f.ids.length)} получателей · ${E(what)}</h2>
       <div class="form-grid"><label class="field">Название кампании<input name="title" maxlength="120" value="${E(f.title)}" placeholder="${E(what)}"></label>
       <label class="field">Скрипт<select name="script"><option value="auto" ${f.script === 'auto' ? 'selected' : ''}>Авто: под тип сайта лида</option>${scripts.items.map(s => `<option value="${E(s.slug)}" ${s.slug === f.script ? 'selected' : ''}>${E(s.title)}</option>`).join('')}</select></label></div>
-      <p class="small muted">Каждому лиду текст подставится сам: название, город, ниша, тип сайта. Строка про «СТОП» добавляется автоматически. Стоп-лист, «Не писать», дубли и лиды без username Telegram пропускаются.</p>
+      <p class="small muted">Каждому лиду текст подставится сам: название, город, ниша, тип сайта. Стоп-лист, «Не писать», дубли и лиды без username Telegram пропускаются.</p>
       <h3>С каких аккаунтов</h3><div class="checkboxes">${usable.length ? usable.map(a => `<label><input type="checkbox" name="accounts" value="${a.id}" ${f.accounts.includes(String(a.id)) ? 'checked' : ''}> ${E(a.label)} · сегодня ${E(a.sent_today)} из ${E(a.limit_today)}</label>`).join('') : '<span class="muted">Нет готовых аккаунтов — добавьте и войдите во вкладке «Аккаунты».</span>'}</div>
       <div class="ml-live"><div>Сообщения получат настоящие организации. Паузы, лимиты в день и в час и окно отправки — из «Настроек». Для запуска введите слово <code>${E(o.confirm_word)}</code>.</div><input name="confirm" autocomplete="off" aria-label="Слово подтверждения"></div>
       <div class="toolbar"><button class="btn primary" ${f.ids.length && usable.length ? '' : 'disabled'}>Запустить рассылку</button><button type="button" class="btn" data-ml="compose-review" ${f.ids.length && usable.length ? '' : 'disabled'}>Сначала посмотреть тексты</button><button type="button" class="ghost" data-ml="compose-cancel">Отмена</button></div></section></form>`;
