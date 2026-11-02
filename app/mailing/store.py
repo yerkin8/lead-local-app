@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .logsafe import scrub
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS accounts (
@@ -128,7 +128,8 @@ CREATE TABLE IF NOT EXISTS batch_exclusions (   -- «Убрать из пачк�
 TERMINAL = ("sent", "dry_sent", "skipped", "unreachable", "failed")
 # Columns added after the first release (ALTER TABLE on open). Version 2: campaigns.no_wait (tests).
 ADDED_COLUMNS = {
-    "recipients": [("edited", "INTEGER NOT NULL DEFAULT 0")],   # text edited by the owner (redesign 02)
+    "recipients": [("edited", "INTEGER NOT NULL DEFAULT 0"),   # text edited by the owner (redesign 02)
+                   ("targets", "TEXT NOT NULL DEFAULT ''")],     # v3: next mobile numbers to try (N33)
     "campaigns": [("batch_id", "INTEGER"), ("parent_id", "INTEGER"),  # batches and repeats (next/03)
                   ("stage", "TEXT NOT NULL DEFAULT 'first'"),
                   ("no_wait", "INTEGER NOT NULL DEFAULT 0")],   # test campaign «Без ожидания» (next2)

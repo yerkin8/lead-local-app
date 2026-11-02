@@ -353,7 +353,7 @@ class StopListTests(MailingCase):
         self.assertEqual(reasons["b1"], "В стоп-листе")
         self.assertEqual(reasons["b2"], "В стоп-листе")
         self.assertEqual(reasons["b3"], "В стоп-листе")
-        self.assertIn("username", reasons["b6"])
+        self.assertIn("контакт", reasons["b6"])
         self.assertIn("телефон", reasons["b7"])
         result = self.live(campaign["id"])
         sent = {r["business_id"] for r in result["recipients"] if r["status"] == "sent"}
@@ -597,7 +597,7 @@ class FromLeadsTests(MailingCase):
         rows = [(r["business_id"], r["status"], r["reason"]) for r in campaign["recipients"]]
         self.assertEqual([r[0] for r in rows], ["b6", "b3", "b5", "b2"])
         self.assertEqual(rows[1][1:], ("skipped", "В стоп-листе"))
-        self.assertEqual(rows[2][1:], ("skipped", "Нет username Telegram"))
+        self.assertEqual(rows[2][1:], ("queued", ""))   # no username, but a mobile: written to by number (N33)
         self.assertEqual(json.loads(campaign["filters_json"])["ids"][0], "b6")
         self.assertEqual(campaign["mode"], "dry")
         self.assertEqual(self.fake.delivered, [])

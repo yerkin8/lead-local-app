@@ -294,8 +294,18 @@ class Engine:
                 return "skipped", "stoplist", "Номер в стоп-листе"
             if recipient["telegram_user_id"] and recipient["telegram_user_id"] in stop["telegram_user"]:
                 return "skipped", "stoplist", "Аккаунт в стоп-листе"
+            # A number known as hidden / without Telegram: go on to the card's next mobile (N33).
+            left = [item for item in (recipient.get("targets") or "").split(",") if item]
+            while username.startswith("+") and left and self.store.value(
+                    "SELECT 1 FROM unreachable WHERE target=?", (f"username:{username}",)):
+                username, left = left[0], left[1:]
+                with self.store.tx() as conn:
+                    conn.execute("UPDATE recipients SET username=?,targets=? WHERE id=?",
+                                 (username, ",".join(left), recipient["id"]))
+                recipient.update(username=username, targets=",".join(left))
             if self.store.value("SELECT 1 FROM unreachable WHERE target=?", (f"username:{username}",)):
-                return "unreachable", "known_unreachable", "Ранее недоступен, повторов нет"
+                return "unreachable", "known_unreachable", ("Номер скрыт или без Telegram" if username.startswith("+")
+                                                            else "Ранее недоступен, повторов нет")
             verdict = self.send_guard(campaign, recipient, self.store.value)
             if verdict:
                 return verdict
@@ -496,6 +506,8 @@ class Engine:
             return Peer(int(cached["telegram_user_id"]), int(cached["access_hash"]))
         if username.startswith("+") and campaign["kind"] == "test":
             peer = await self.gateway.resolve_contact(account["id"], username)
+        elif username.startswith("+"):
+            peer = await self.gateway.resolve_phone(account["id"], username)   # «Telegram по номеру» (N33)
         else:
             peer = await self.gateway.resolve_username(account["id"], username)
         with self.store.tx() as conn:
@@ -510,6 +522,8 @@ class Engine:
         try:
             peer = await self._peer(campaign, account, recipient)
         except GatewayError as error:
+            if self._next_target(campaign, recipient, error):
+                return   # the next mobile number of the card is tried on the next turn
             await self._handle_recipient_error(campaign, account_id, recipient, None, error)
             return
         if campaign["kind"] == "normal" and str(peer.user_id) in self.store.stop_set()["telegram_user"]:
@@ -578,6 +592,22 @@ class Engine:
         pause = self.policy().pause_seconds(self.rng)
         self.store.set_setting(f"next_send:{account_id}", iso(self.clock() + timedelta(seconds=pause)))
 
+    def _next_target(self, campaign: dict, recipient: dict, error: GatewayError) -> bool:
+        """A number that is not found (no Telegram or hidden by its owner): remember it and switch the recipient to
+        the card's next mobile number, if there is one."""
+        target = recipient["username"] or ""
+        left = [item for item in (recipient.get("targets") or "").split(",") if item]
+        if campaign["kind"] != "normal" or not target.startswith("+") or error.kind not in gw.UNREACHABLE_KINDS:
+            return False
+        with self.store.tx() as conn:
+            conn.execute("INSERT OR IGNORE INTO unreachable VALUES (?,?,?)",
+                         (f"username:{target}", error.kind, iso(self.clock())))
+            if not left:
+                return False
+            conn.execute("UPDATE recipients SET username=?,targets=? WHERE id=?",
+                         (left[0], ",".join(left[1:]), recipient["id"]))
+        return True
+
     def _finish_sent(self, recipient: dict, attempt_id: int, msg_id: int | None, response: str) -> None:
         now = iso(self.clock())
         with self.store.tx() as conn:
@@ -602,6 +632,8 @@ class Engine:
 
     async def _handle_recipient_error(self, campaign, account_id, recipient, attempt_id, error: GatewayError):
         label = gw.KIND_LABELS.get(error.kind, error.kind)
+        if error.kind == gw.NOT_FOUND and str(recipient.get("username") or "").startswith("+"):
+            label = "Номер скрыт или без Telegram"
         if error.kind == gw.NETWORK:
             self._connected.discard(account_id)
             raise _NetworkTrouble()  # attempt stays 'sending' and is reconciled next time

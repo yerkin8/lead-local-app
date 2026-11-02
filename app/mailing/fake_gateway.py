@@ -28,6 +28,7 @@ class Delivered:
 class FakeGateway(TelegramGateway):
     users: dict[str, Peer] = field(default_factory=dict)        # username (casefold) -> peer
     contacts: dict[str, Peer] = field(default_factory=dict)     # phone digits -> peer
+    phones: dict[str, Peer] = field(default_factory=dict)       # numbers whose account resolves (resolvePhone)
     delivered: list[Delivered] = field(default_factory=list)
     # Errors to raise: key is (operation, target) where target is username / user id / "*".
     errors: dict[tuple[str, str], list[GatewayError]] = field(default_factory=dict)
@@ -132,6 +133,21 @@ class FakeGateway(TelegramGateway):
         peer = self.contacts.get("".join(ch for ch in phone if ch.isdigit()))
         if not peer:
             raise GatewayError(NOT_FOUND, "not in contacts")
+        return peer
+
+    async def resolve_phone(self, account_id, phone):
+        """Numbers that show their account to everyone are in `phones`; others are «not found»."""
+        self.calls.append(("resolve_phone", account_id, phone))
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        self._maybe_fail("resolve_phone", digits)
+        peer = self.phones.get(digits)
+        if not peer:
+            raise GatewayError(NOT_FOUND, "PHONE_NOT_OCCUPIED")
+        return peer
+
+    def add_phone(self, digits: str) -> Peer:
+        peer = Peer(next(self._next_user), 77, "user")
+        self.phones["".join(ch for ch in digits if ch.isdigit())] = peer
         return peer
 
     async def send_message(self, account_id, peer, text, random_id):

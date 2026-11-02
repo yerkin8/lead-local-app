@@ -74,6 +74,21 @@ def phone_keys(business: dict) -> list[str]:
     return sorted(set(result))
 
 
+def _phone_mask(target: str) -> str:
+    """'+79607022727' → '+7 9•• •••-••-27' (the card shows the full number; the mailing list does not)."""
+    digits = re.sub(r"\D", "", target)
+    if len(digits) == 11 and digits[0] == "7":
+        return f"+7 {digits[1]}•• •••-••-{digits[-2:]}"
+    return "+" + "•" * max(0, len(digits) - 2) + digits[-2:]
+
+
+def mobile_targets(business: dict) -> list[str]:
+    """Mobile numbers of the card in card order as "+<E.164 digits>" (landlines get no Telegram link)."""
+    from ..phone_links import build_telegram_phone_links
+    return list(dict.fromkeys("+" + item["e164"] for item in build_telegram_phone_links(business.get("phones") or [])
+                              if item["ok"] and item["e164"]))
+
+
 def with_footer(text: str) -> str:
     from ..domain import strip_links
     text = strip_links(text)   # no links in outgoing messages (docs/next/DECISIONS.md N29)
@@ -396,18 +411,20 @@ class MailingService:
                 item = None if identity in seen else self._business(identity)
                 seen.add(identity)
                 if item:
-                    items.append({**item, "_username": username_from_business(item), "_phones": phone_keys(item)})
+                    items.append({**item, "_username": username_from_business(item), "_phones": phone_keys(item),
+                                  "_mobiles": mobile_targets(item)})
             return items
         query = {key: filters[key] for key in ("niche", "country", "city", "site_type", "status", "q")
                  if filters.get(key)}
         items = []
         for item in self._businesses(query, 2000):
-            username, phones = username_from_business(item), phone_keys(item)
-            if contact == "username" and not username:
+            username, phones, mobiles = username_from_business(item), phone_keys(item), mobile_targets(item)
+            # «Telegram контакт»: a @username or a mobile number (written to through «Telegram по номеру», N33).
+            if contact == "username" and not (username or mobiles):
                 continue
             if contact == "phone" and not phones:
                 continue
-            items.append({**item, "_username": username, "_phones": phones})
+            items.append({**item, "_username": username, "_phones": phones, "_mobiles": mobiles})
         return items
 
     def _template_for(self, template: str, business: dict) -> str:
@@ -500,16 +517,20 @@ class MailingService:
                     username = targets[position % len(targets)]
                     # The owner's own accounts: Moscow time, the same window as businesses (E-M-04).
                     key, tz = f"test:{item['id']}", DEFAULT_TZ
+                    targets_left = ""
                 else:
-                    username = item["_username"]
+                    # @username first; without it the first mobile number, the next ones if it is not found (N33).
+                    mobiles = list(item.get("_mobiles") or [])
+                    username = item["_username"] or (mobiles[0] if mobiles else "")
+                    targets_left = "" if item["_username"] else ",".join(mobiles[1:])
                     key = username or f"business:{item['id']}"
                     tz = recipient_tz(item.get("city"), item.get("country"))
                     if item["id"] in stop["business"] or (username and username in stop["username"]) or set(item["_phones"]) & stop["phone"]:
                         status, reason_kind, reason = "skipped", "stoplist", "В стоп-листе"
                     elif by_ids and not username:
-                        status, reason_kind, reason = "skipped", "no_contact", "Нет username Telegram"
+                        status, reason_kind, reason = "skipped", "no_contact", "Нет username Telegram и мобильного номера"
                     elif key in seen_keys:
-                        status, reason_kind, reason = "skipped", "duplicate", "Тот же username у другой организации"
+                        status, reason_kind, reason = "skipped", "duplicate", "Тот же контакт у другой организации"
                         key = f"dup:{item['id']}"
                     elif set(item["_phones"]) & seen_phones:
                         status, reason_kind, reason = "skipped", "duplicate", "Тот же телефон у другой организации"
@@ -517,10 +538,11 @@ class MailingService:
                 seen_keys.add(key)
                 conn.execute(
                     "INSERT INTO recipients (campaign_id,business_id,business_name,account_id,username,phones,"
-                    "dedupe_key,message,tz,status,reason_kind,reason,position) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "dedupe_key,message,tz,status,reason_kind,reason,position,targets) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (campaign_id, item["id"], item["name"], account["id"], username or None,
                      ",".join(item["_phones"]), key, self._message(template, item), tz, status, reason_kind,
-                     reason, position))
+                     reason, position, "" if kind == "test" else targets_left))
             self.store.event("campaign_created", f"Кампания создана: {len(selected)} получателей, сухой запуск",
                              campaign_id=campaign_id, conn=conn)
         return self.campaign(campaign_id)
@@ -754,8 +776,8 @@ class MailingService:
                 item["due_when"] = when_text(due, item.get("tz"), "" if test_kind else
                                              (self._business(item["business_id"]) or {}).get("city", ""))
                 item["message"] = apply_greeting(item["message"], due, item.get("tz"))
-            if test_kind and item["username"] and item["username"].startswith("+"):
-                item["username"] = mask_digits(item["username"])
+            if item["username"] and item["username"].startswith("+"):
+                item["username"] = mask_digits(item["username"]) if test_kind else "по номеру " + _phone_mask(item["username"])
             business = self._business(item["business_id"]) or {}
             item["lead_status"] = business.get("status") or ""
             if item["sent_at"]:

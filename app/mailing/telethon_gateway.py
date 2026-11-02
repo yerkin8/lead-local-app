@@ -27,7 +27,7 @@ _BY_NAME = {
     "ALLOW_PAYMENT_REQUIRED": gw.PRIVACY, "CHAT_WRITE_FORBIDDEN": gw.PRIVACY,
     "USER_IS_BLOCKED": gw.BLOCKED, "YOU_BLOCKED_USER": gw.BLOCKED,
     "USERNAME_NOT_OCCUPIED": gw.NOT_FOUND, "USERNAME_INVALID": gw.NOT_FOUND,
-    "PEER_ID_INVALID": gw.NOT_FOUND,
+    "PEER_ID_INVALID": gw.NOT_FOUND, "PHONE_NOT_OCCUPIED": gw.NOT_FOUND,
     "INPUT_USER_DEACTIVATED": gw.RECIPIENT_GONE,
     "RANDOM_ID_DUPLICATE": gw.DUPLICATE,
     "PHONE_CODE_INVALID": gw.AUTH_CODE_INVALID, "PHONE_CODE_EXPIRED": gw.AUTH_CODE_INVALID,
@@ -218,6 +218,27 @@ class TelethonGateway(TelegramGateway):
                      if "".join(ch for ch in (item.phone or "") if ch.isdigit()) == digits), None)
         if not user:
             raise GatewayError(gw.NOT_FOUND, "not in contacts")
+        return Peer(int(user.id), int(user.access_hash or 0))
+
+    async def resolve_phone(self, account_id, phone):
+        from telethon.tl.functions.contacts import ResolvePhoneRequest
+        from telethon.tl.types import User
+
+        client = self._require(account_id)
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        try:
+            result = await self._guard(client(ResolvePhoneRequest(digits)))
+        except GatewayError as error:
+            if error.kind == gw.AUTH_PHONE_INVALID:   # PHONE_NUMBER_UNOCCUPIED / INVALID: no account for it
+                raise GatewayError(gw.NOT_FOUND, "phone not occupied") from None
+            raise
+        user = next((item for item in result.users if isinstance(item, User)), None)
+        if not user:
+            raise GatewayError(gw.NOT_FOUND, "phone not occupied")
+        if user.bot:
+            raise GatewayError(gw.NOT_USER, "bot")
+        if user.deleted:
+            raise GatewayError(gw.RECIPIENT_GONE, "deleted")
         return Peer(int(user.id), int(user.access_hash or 0))
 
     async def send_message(self, account_id, peer, text, random_id):
