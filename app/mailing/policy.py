@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -151,3 +152,24 @@ class Policy:
         tz = zone(tz_name)
         local = moment.astimezone(tz)
         return datetime.combine(local.date() + timedelta(days=1), time(0), tz).astimezone(timezone.utc)
+
+
+# Greeting by the recipient's local time at the moment of sending (owner, 02.11): 6–10 утро, 10–17 день,
+# from 17 вечер (night also «вечер»). Only a time-of-day greeting at the start is replaced; «Здравствуйте» stays.
+GREETING_RE = re.compile(r"^(\s*)(?:добр(?:ый|ое|ого)\s+(?:день|дня|утро|утра|вечер|вечера)|доброй\s+ночи)", re.I)
+
+
+def greeting_for(moment: datetime, tz_name: str | None) -> str:
+    hour = moment.astimezone(zone(tz_name or DEFAULT_TZ)).hour
+    if 6 <= hour < 10:
+        return "Доброго утра"
+    if 10 <= hour < 17:
+        return "Добрый день"
+    return "Добрый вечер"
+
+
+def apply_greeting(text: str, moment: datetime, tz_name: str | None) -> str:
+    def swap(match):
+        word = greeting_for(moment, tz_name)
+        return match.group(1) + (word if match.group(0).strip()[:1].isupper() else word.lower())
+    return GREETING_RE.sub(swap, str(text or ""), count=1)

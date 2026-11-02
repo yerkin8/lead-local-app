@@ -196,6 +196,23 @@ async function mailingComposeTemplate(payload) {
   return (scripts.items.find(s => s.slug === payload.script) || {}).body || 'auto';
 }
 
+// «уйдёт через 1 ч 20 мин» to the planned moment (an estimate: pauses are taken at their middle).
+function mlCountdown(iso) {
+  const left = Math.round((new Date(iso).getTime() - Date.now()) / 60000);
+  if (left <= 0) return 'уходит сейчас';
+  const d = Math.floor(left / 1440), h = Math.floor((left % 1440) / 60), m = left % 60;
+  return 'уйдёт через ' + [d ? `${d} дн` : '', h ? `${h} ч` : '', !d && m ? `${m} мин` : ''].filter(Boolean).join(' ');
+}
+// One chain of timeouts while a campaign is on screen (no intervals in the desktop UI).
+let mlDueTimer = null;
+function mlTickDue() {
+  clearTimeout(mlDueTimer);
+  const nodes = document.querySelectorAll('.ml-due[data-due]');
+  if (state.view !== 'mailing' || !nodes.length) return;
+  nodes.forEach(n => { n.textContent = mlCountdown(n.dataset.due); });
+  mlDueTimer = setTimeout(mlTickDue, 30000);
+}
+
 // What happened to one business of the batch, in the owner's words.
 function mlResult(r) {
   if (r.replied_at) return ['Ответил', 'green'];
@@ -224,7 +241,7 @@ function mailingRecipient(c, r) {
   const batchAction = c.kind === 'normal' || c.kind === 'test'
     ? (r.excluded ? `<button type="button" class="ghost" data-ml-include="${E(r.business_id)}">Вернуть в пачку</button>`
       : `<button type="button" class="ghost" data-ml-exclude="${E(r.business_id)}" title="Не писать ему в повторах этой пачки">Убрать из пачки</button>`) : '';
-  return `<div class="row small ml-recipient"><div class="row-head"><div><span class="row-title">${E(r.business_name)}</span><div class="muted">${who}${r.msg_id ? ` · сообщение № ${E(r.msg_id)}` : ''}${r.sent_when ? ` · ${E(r.sent_when)}` : r.sent_at ? ` · ${E(mlTime(r.sent_at))}` : ''}${r.status === 'dry_sent' && r.reason ? ` · ${E(r.reason)}` : ''}</div></div><div class="row-actions"><div class="chips">${r.edited ? mlChip('Текст изменён', 'purple') : ''}${lead ? mlChip(`В «Лидах»: ${lead}`) : ''}${mlChip(result, tone)}</div>${batchAction}<button type="button" class="ghost" data-open="${E(r.business_id)}">Карточка</button></div></div>${r.reason && !['Отправлено'].includes(result) ? `<div class="muted">${E(r.reason)}</div>` : ''}${text}</div>`;
+  return `<div class="row small ml-recipient"><div class="row-head"><div><span class="row-title">${E(r.business_name)}</span><div class="muted">${who}${r.msg_id ? ` · сообщение № ${E(r.msg_id)}` : ''}${r.sent_when ? ` · ${E(r.sent_when)}` : r.sent_at ? ` · ${E(mlTime(r.sent_at))}` : ''}${r.status === 'dry_sent' && r.reason && !r.due_at ? ` · ${E(r.reason)}` : ''}</div>${r.due_at ? `<div class="ml-due-line"><b class="ml-due" data-due="${E(r.due_at)}">${E(mlCountdown(r.due_at))}</b> · ${E(r.due_when || '')}${c.mode === 'live' ? '' : ' · если включить отправку сейчас'}</div>` : ''}</div><div class="row-actions"><div class="chips">${r.edited ? mlChip('Текст изменён', 'purple') : ''}${lead ? mlChip(`В «Лидах»: ${lead}`) : ''}${mlChip(result, tone)}</div>${batchAction}<button type="button" class="ghost" data-open="${E(r.business_id)}">Карточка</button></div></div>${r.reason && !['Отправлено'].includes(result) ? `<div class="muted">${E(r.reason)}</div>` : ''}${text}</div>`;
 }
 
 async function mailingCampaignPage(node, o) {
@@ -248,6 +265,7 @@ async function mailingCampaignPage(node, o) {
     <section class="panel" id="ml-repeat">${empty('Готовлю повтор…')}</section>
     <section class="panel" id="ml-recipients"><div class="panel-head"><div><h2>Бизнесы пачки и результат</h2><p>${c.status === 'running' ? 'Кампания идёт — тексты можно менять на паузе.' : 'По каждому бизнесу видно, что произошло. Пока сообщение не ушло, текст можно поправить — он уйдёт именно таким.'}</p></div></div><div class="chips">${mlResultCounts(c.recipients)}</div><div class="list">${c.recipients.map(r => mailingRecipient(c, r)).join('')}</div></section>`;
   await mailingRepeatPanel(node.querySelector('#ml-repeat'), c, o);
+  mlTickDue();
   if (state.mailingJustCreated === c.id) { state.mailingJustCreated = null; setHeader(c.title, 'Тексты подставлены. Поправьте любой при желании, затем сухой запуск или реальная отправка'); node.querySelector('#ml-recipients')?.scrollIntoView(); }
 }
 

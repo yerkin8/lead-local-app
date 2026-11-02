@@ -16,10 +16,10 @@ from urllib.parse import urlparse
 
 from . import gateway as gw
 from .entities import drop_footer, strip_markdown_links
-from .engine import REPEAT_SKIP_STATUSES, Credentials, Engine
+from .engine import REPEAT_SKIP_STATUSES, Credentials, Engine, local_day
 from .gateway import GatewayError, TelegramGateway
 from .logsafe import get_logger, mask_digits, scrub
-from .policy import Policy, recipient_tz, when_text, zone, DEFAULT_TZ
+from .policy import Policy, apply_greeting, recipient_tz, when_text, zone, DEFAULT_TZ
 from .protect import read_secret, restrict_folder, write_secret
 from .store import TERMINAL, Store, iso, parse, utcnow
 
@@ -746,7 +746,14 @@ class MailingService:
         batch_id = self._batch_id(row)
         excluded = {item["business_id"] for item in self.store.rows(
             "SELECT business_id FROM batch_exclusions WHERE batch_id=?", (batch_id,))}
+        planned = self.plan(row) if recipients_limit else {}
         for item in recipients:
+            due = planned.get(item["id"])
+            if due is not None:
+                item["due_at"] = iso(due)
+                item["due_when"] = when_text(due, item.get("tz"), "" if test_kind else
+                                             (self._business(item["business_id"]) or {}).get("city", ""))
+                item["message"] = apply_greeting(item["message"], due, item.get("tz"))
             if test_kind and item["username"] and item["username"].startswith("+"):
                 item["username"] = mask_digits(item["username"])
             business = self._business(item["business_id"]) or {}
@@ -810,13 +817,64 @@ class MailingService:
             self.store.event("campaign_started", "Реальная отправка запущена", level="warning",
                              campaign_id=campaign["id"], conn=conn)
 
+    # ------------------------------------------------------------ schedule (dry run and the timers)
+    def _sim_state(self, account: dict, now, live: bool) -> dict:
+        """Where the account's queue stands: for a live plan the real sends of today and the last hour and the
+        pause after the last message; a dry run starts from a clean account."""
+        state = {"next": now, "today": 0, "hour": [], "day": local_day(now)}
+        if not live:
+            return state
+        policy = self.policy()
+        day_start = policy.end_of_day(now) - timedelta(days=1)
+        state["today"] = self.store.value(
+            "SELECT COUNT(*) FROM attempts WHERE account_id=? AND mode='live' AND status IN ('sent','sending') "
+            "AND started_at>=?", (account["id"], iso(day_start)))
+        state["hour"] = [parse(row["started_at"]) for row in self.store.rows(
+            "SELECT started_at FROM attempts WHERE account_id=? AND mode='live' AND status IN ('sent','sending') "
+            "AND started_at>=? ORDER BY started_at", (account["id"], iso(now - timedelta(hours=1))))]
+        pause = parse(self.store.setting(f"next_send:{account['id']}"))
+        state["next"] = max(now, pause) if pause else now
+        return state
+
+    def _plan_one(self, account: dict, recipient: dict, sim: dict):
+        """Planned moment for the next message of this account; the daily count restarts every day."""
+        policy = self.policy()
+        due = self.engine.earliest_send(account, recipient, now=sim["next"], sent_today=sim["today"],
+                                        last_hour=sim["hour"], last_send=sim["next"])
+        day = local_day(due)
+        sim["today"] = sim["today"] + 1 if day == sim["day"] else 1
+        sim["day"] = day
+        sim["hour"] = [item for item in sim["hour"] if item > due - timedelta(hours=1)] + [due]
+        sim["next"] = due + timedelta(seconds=(policy.delay_min + policy.delay_max) // 2)
+        return due
+
+    def plan(self, campaign: dict) -> dict[int, object]:
+        """When each message still waiting is expected to go (recipient id → UTC moment). Live campaigns start from
+        the account's real state; a dry campaign shows the plan as if it were switched on now. Pauses are taken
+        at their middle, so this is an estimate; other campaigns on the same account are not counted."""
+        live = campaign["mode"] == "live"
+        statuses = ("sending", "queued") if live else ("queued", "dry_sent")
+        if live and campaign["status"] == "done":
+            return {}
+        now = utcnow()
+        state: dict[int, dict] = {}
+        result = {}
+        for recipient in self.store.rows(
+                f"SELECT * FROM recipients WHERE campaign_id=? AND status IN ('{statuses[0]}','{statuses[1]}') "
+                "ORDER BY CASE status WHEN 'sending' THEN 0 ELSE 1 END, position", (campaign["id"],)):
+            account = self.store.row("SELECT * FROM accounts WHERE id=?", (recipient["account_id"],))
+            if not account:
+                continue
+            sim = state.setdefault(account["id"], self._sim_state(account, now, live))
+            result[recipient["id"]] = self._plan_one(account, recipient, sim)
+        return result
+
     def dry_run(self, campaign_id: int) -> dict:
         """Same checks as a live run, no Telegram calls. Shows when each message would go."""
         campaign = self.store.row("SELECT * FROM campaigns WHERE id=?", (int(campaign_id),))
         if campaign["mode"] != "dry" or campaign["status"] not in ("draft", "done"):
             raise ValueError("Сухой запуск доступен только для черновика")
         engine = self.engine
-        policy = self.policy()
         now = utcnow()
         state: dict[int, dict] = {}
         for recipient in self.store.rows("SELECT * FROM recipients WHERE campaign_id=? AND status='queued' "
@@ -826,12 +884,8 @@ class MailingService:
             if verdict:
                 engine._close_recipient(recipient["id"], *verdict)
                 continue
-            sim = state.setdefault(account["id"], {"next": now, "today": 0, "hour": []})
-            due = engine.earliest_send(account, recipient, now=sim["next"], sent_today=sim["today"],
-                                       last_hour=sim["hour"], last_send=sim["next"])
-            sim["today"] += 1
-            sim["hour"] = [item for item in sim["hour"] if item > due - timedelta(hours=1)] + [due]
-            sim["next"] = due + timedelta(seconds=(policy.delay_min + policy.delay_max) // 2)
+            sim = state.setdefault(account["id"], self._sim_state(account, now, live=False))
+            due = self._plan_one(account, recipient, sim)
             city = "" if campaign["kind"] == "test" else (self._business(recipient["business_id"]) or {}).get("city", "")
             local = when_text(due, recipient["tz"], city)
             with self.store.tx() as conn:
@@ -839,8 +893,9 @@ class MailingService:
                              "finished_at,server_response) VALUES (?,?,0,'dry','dry',?,?,?)",
                              (recipient["id"], account["id"], iso(utcnow()), iso(utcnow()),
                               f"сухой запуск: ушло бы {local}"))
-                conn.execute("UPDATE recipients SET status='dry_sent',reason_kind='dry',reason=? WHERE id=?",
-                             (f"Уйдёт {local}", recipient["id"]))
+                conn.execute("UPDATE recipients SET status='dry_sent',reason_kind='dry',reason=?,message=? WHERE id=?",
+                             (f"Уйдёт {local}", apply_greeting(recipient["message"], due, recipient["tz"]),
+                              recipient["id"]))
         with self.store.tx() as conn:
             conn.execute("UPDATE campaigns SET status='done',finished_at=?,updated_at=? WHERE id=?",
                          (iso(utcnow()), iso(utcnow()), campaign["id"]))

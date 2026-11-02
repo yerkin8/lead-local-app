@@ -124,9 +124,12 @@ def next_checks(window):
     js(window, f'setView("mailing", {{mailingCampaign: {campaign["id"]}}})'); time.sleep(2)
     wait(window, 'document.querySelector("#ml-repeat-form")', 8)
     page = js(window, 'document.querySelector("#content").innerText') or ""
-    check("mailing_batch_results_per_business", "Бизнесы пачки и результат" in page and "Сухой запуск" in page and "Уйдёт" in page,
+    check("mailing_batch_results_per_business", "Бизнесы пачки и результат" in page and "Сухой запуск" in page and "уйдёт" in page.lower(),
           page[:300])
     check("mailing_lead_status_shown", "В «Лидах»: Ответили" in page)
+    check("mailing_every_card_has_timer",
+          js(window, 'document.querySelectorAll(".ml-recipient").length') == js(window, 'document.querySelectorAll(".ml-recipient .ml-due").length') > 0,
+          [js(window, 'document.querySelectorAll(".ml-recipient").length'), js(window, 'document.querySelectorAll(".ml-recipient .ml-due").length')])
     check("mailing_exclude_buttons", js(window, 'document.querySelectorAll("[data-ml-exclude]").length') == len(ids))
     check("mailing_repeat_reminder_default",
           js(window, 'document.querySelector("#ml-repeat-form [name=template]").value') == "auto:reminder")

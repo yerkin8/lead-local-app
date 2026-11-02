@@ -14,7 +14,7 @@ from . import gateway as gw
 from .entities import drop_footer
 from .gateway import GatewayError, Peer, TelegramGateway
 from .logsafe import get_logger, scrub
-from .policy import DEFAULT_TZ, Policy, zone
+from .policy import DEFAULT_TZ, Policy, apply_greeting, zone
 from .store import Store, iso, parse, utcnow
 
 log = get_logger()
@@ -559,7 +559,11 @@ class Engine:
                     "INSERT INTO attempts (recipient_id,account_id,random_id,mode,status,started_at) "
                     "VALUES (?,?,?,?,?,?)",
                     (recipient["id"], account_id, random_id, "live", "sending", iso(self.clock()))).lastrowid
-                conn.execute("UPDATE recipients SET status='sending' WHERE id=?", (recipient["id"],))
+                # The greeting fits the recipient's local time now (утро/день/вечер); the final text is saved, so a
+                # check after a crash compares exactly what went out.
+                final = apply_greeting(drop_footer(recipient["message"]), self.clock(), recipient["tz"])
+                recipient = {**recipient, "message": final}
+                conn.execute("UPDATE recipients SET status='sending',message=? WHERE id=?", (final, recipient["id"]))
                 conn.execute("UPDATE accounts SET first_send_day=COALESCE(first_send_day,?) WHERE id=?",
                              (local_day(self.clock()).isoformat(), account_id))
         try:

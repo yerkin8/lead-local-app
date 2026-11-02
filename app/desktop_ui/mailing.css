@@ -18,3 +18,4 @@
 .ml-edit { margin-top: 8px; display: grid; gap: 8px; }
 .ml-edit textarea { width: 100%; box-sizing: border-box; font: inherit; color: var(--text-primary); background: var(--bg-hover);
   border: 1px solid var(--border); border-radius: 8px; padding: 10px; resize: vertical; }
+.ml-due-line { margin-top: 2px; font-size: 13px; } .ml-due { font-weight: 600; color: var(--accent-action, var(--accent)); }
