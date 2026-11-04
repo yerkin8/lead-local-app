@@ -354,6 +354,10 @@ def record_mailing(kind: str, data: dict, path: Path = DB_PATH) -> None:
     outreach entry like a manual send, so «Сегодня» offers a reminder after FOLLOWUP_AFTER and does
     not offer a second one after a mailing reminder. ``replied``: «Ответили». ``stop``: «Не писать»
     and «Отказ», as for a manual «Попросили не писать». The mailing actor has its own daily budget."""
+    if kind in ("taken", "released") and data.get("ids") is not None:
+        for business_id in data["ids"]:
+            record_mailing(kind, {"business_id": business_id}, path)
+        return
     business_id = str(data.get("business_id") or "")
     business = db.business(business_id, path) if business_id else None
     if not business:
@@ -376,6 +380,18 @@ def record_mailing(kind: str, data: dict, path: Path = DB_PATH) -> None:
     elif kind == "stop":
         db.set_suppression(business_id, True, "Попросили не писать (ответ в Telegram)", path)
         db.set_business(business_id, "unsuitable", None, path)
+    elif kind == "taken":
+        # Taken into a new mailing campaign (N34): «Новый» → «Написал» at once, so the next batch takes
+        # other leads. No outreach entry: «Сегодня» offers a reminder only after a real send («sent»).
+        if business["status"] == "not_started":
+            db.set_business(business_id, "waiting", None, path)
+    elif kind == "released":
+        # The campaign was deleted before anything went out: back to «Новый», unless the owner changed the
+        # status meanwhile or the lead was written to some other way.
+        with db.connection(path) as conn:
+            written = conn.execute("SELECT 1 FROM outreach WHERE business_id=? LIMIT 1", (business_id,)).fetchone()
+        if business["status"] == "waiting" and not written:
+            db.set_business(business_id, "not_started", None, path)
 
 
 ACTIVE_STATUSES = ("waiting", "call", "replied", "working")

@@ -135,10 +135,35 @@ class LeadEventTests(BatchCase):
         self.assertIn(("replied", {"business_id": "b1"}), self.events)
         self.assertIn(("stop", {"business_id": "b2"}), self.events)
 
-    def test_dry_and_test_campaigns_do_not_touch_leads(self):
-        dry = self.service.create_campaign("Сухая", {"ids": ["b1"]}, TEMPLATE, [self.account_id])
+    def test_new_campaign_takes_its_leads_and_delete_gives_them_back(self):
+        # N34: creating a first-message campaign marks its «Новые» leads at once (dry runs too); deleting it
+        # before anything went out gives them back. Repeats do not take leads again.
+        dry = self.service.create_campaign("Сухая", {"ids": ["b1", "b2"]}, TEMPLATE, [self.account_id])
+        self.assertEqual(self.events, [("taken", {"ids": ["b1", "b2"]})])
         self.service.dry_run(dry["id"])
-        self.assertEqual(self.events, [])
+        self.service.delete_campaign(dry["id"])
+        self.assertEqual(self.events[-1], ("released", {"ids": ["b1", "b2"]}))
+
+    def test_only_new_leads_go_into_a_first_message(self):
+        self.orgs[1]["status"] = "waiting"                           # b2 already «Написал»
+        campaign = self.service.create_campaign("Т", {"ids": ["b1", "b2"]}, TEMPLATE, [self.account_id])
+        rows = {r["business_id"]: r for r in campaign["recipients"]}
+        self.assertEqual(rows["b2"]["reason"], "Уже не «Новый» в «Лидах»")
+        self.assertEqual(rows["b1"]["status"], "queued")
+        self.assertEqual(self.events, [("taken", {"ids": ["b1"]})])
+
+    def test_repeat_and_test_campaigns_take_nothing(self):
+        first = self.first_batch(("b1",))
+        self.events.clear()
+        self.service.repeat(first["id"])
+        self.assertFalse([e for e in self.events if e[0] == "taken"])
+
+    def test_campaigns_made_before_the_change_are_marked_once(self):
+        self.service.create_campaign("Старая", {"ids": ["b3"]}, TEMPLATE, [self.account_id])
+        self.events.clear()
+        self.assertEqual(self.service.mark_taken_before_n34(), 1)
+        self.assertEqual(self.events, [("taken", {"ids": ["b3"]})])
+        self.assertEqual(self.service.mark_taken_before_n34(), 0)    # only once
 
 
 class RecordMailingTests(unittest.TestCase):
@@ -189,6 +214,18 @@ class RecordMailingTests(unittest.TestCase):
         self.assertEqual(db.business("13", self.path)["status"], "unsuitable")
         self.assertIn("13", db.suppressed_ids(self.path))
         outreach.record_mailing("sent", {"business_id": "nope"}, self.path)    # unknown: ignored
+
+    def test_taken_marks_only_new_and_released_gives_back_unless_written(self):
+        from app import db, outreach
+        outreach.record_mailing("taken", {"ids": ["11", "12", "13"]}, self.path)
+        self.assertEqual([db.business(x, self.path)["status"] for x in ("11", "12", "13")],
+                         ["waiting", "working", "call"])               # only «Новый» changes
+        outreach.record_mailing("released", {"ids": ["11"]}, self.path)
+        self.assertEqual(db.business("11", self.path)["status"], "not_started")
+        outreach.record_mailing("taken", {"ids": ["11"]}, self.path)
+        outreach.record_mailing("sent", {"business_id": "11", "username": "cafe_11", "stage": "first"}, self.path)
+        outreach.record_mailing("released", {"ids": ["11"]}, self.path)   # really written: stays «Написал»
+        self.assertEqual(db.business("11", self.path)["status"], "waiting")
 
 
 if __name__ == "__main__":

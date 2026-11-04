@@ -134,7 +134,25 @@ class MailingService:
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
         # Attempts left in 'sending' by a crash are reconciled by the engine on the next run.
+        self.mark_taken_before_n34()
         self.engine.start_thread()
+
+    def mark_taken_before_n34(self) -> int:
+        """Once: businesses of first-message campaigns created before N34 that are still «Новые» get
+        «Написал», so «Разослать этой пачке» stops taking them again."""
+        if self.store.setting("taken_backfill_n34", False):
+            return 0
+        ids = [row["business_id"] for row in self.store.rows(
+            "SELECT DISTINCT r.business_id FROM recipients r JOIN campaigns c ON c.id=r.campaign_id "
+            "WHERE c.kind='normal' AND c.parent_id IS NULL")]
+        try:
+            self._lead_events("taken", {"ids": ids})
+        except Exception:
+            log.exception("Разовая отметка «Написал» для прежних кампаний")
+            return 0
+        self.store.set_setting("taken_backfill_n34", True)
+        self.store.event("taken_backfill", f"Лиды прежних кампаний отмечены «Написал»: проверено {len(ids)}")
+        return len(ids)
 
     def shutdown(self, timeout: float = 15) -> bool:
         return self.engine.shutdown(timeout)
@@ -491,6 +509,7 @@ class MailingService:
                 raise ValueError("Нет тестовых адресатов. Загрузите secrets\\accounts.local.json (поле test_recipients)")
             limit = min(int(limit or 3), MAX_TEST_RECIPIENTS)
         selected = self._select(filters if kind == "normal" else {**(filters or {}), "contact": "any"})
+        first_message = kind == "normal" and not (batch or {}).get("parent_id")
         if limit:
             selected = selected[:int(limit)]
         if not selected:
@@ -525,7 +544,10 @@ class MailingService:
                     targets_left = "" if item["_username"] else ",".join(mobiles[1:])
                     key = username or f"business:{item['id']}"
                     tz = recipient_tz(item.get("city"), item.get("country"))
-                    if item["id"] in stop["business"] or (username and username in stop["username"]) or set(item["_phones"]) & stop["phone"]:
+                    if first_message and (item.get("status") or "not_started") != "not_started":
+                        # Only «Новые» leads go into a first message (N34); others were taken or are in work.
+                        status, reason_kind, reason = "skipped", "not_new", "Уже не «Новый» в «Лидах»"
+                    elif item["id"] in stop["business"] or (username and username in stop["username"]) or set(item["_phones"]) & stop["phone"]:
                         status, reason_kind, reason = "skipped", "stoplist", "В стоп-листе"
                     elif by_ids and not username:
                         status, reason_kind, reason = "skipped", "no_contact", "Нет username Telegram и мобильного номера"
@@ -545,6 +567,16 @@ class MailingService:
                      reason, position, "" if kind == "test" else targets_left))
             self.store.event("campaign_created", f"Кампания создана: {len(selected)} получателей, сухой запуск",
                              campaign_id=campaign_id, conn=conn)
+            taken = [item["id"] for item in selected
+                     if first_message and (item.get("status") or "not_started") == "not_started"]
+            if taken:   # remembered so that deleting the campaign can give the leads back
+                conn.execute("UPDATE campaigns SET filters_json=? WHERE id=?",
+                             (json.dumps({**(filters or {}), "taken": taken}, ensure_ascii=False), campaign_id))
+        if taken:
+            try:
+                self._lead_events("taken", {"ids": taken})   # «Лиды»: «Новый» → «Написал» at once (N34)
+            except Exception:
+                log.exception("Отметка «Написал» при создании кампании")
         return self.campaign(campaign_id)
 
     def launch(self, title: str, ids: list, template: str, account_ids: list, confirm: str) -> dict:
@@ -959,8 +991,14 @@ class MailingService:
             raise ValueError("Сначала поставьте кампанию на паузу")
         if campaign["counts"]["sent"]:
             raise ValueError("Из кампании уже отправлены сообщения — она остаётся в истории")
+        taken = (json.loads(campaign.get("filters_json") or "{}") or {}).get("taken") or []
         with self.store.tx() as conn:
             conn.execute("DELETE FROM campaigns WHERE id=?", (campaign["id"],))
+        if taken:
+            try:
+                self._lead_events("released", {"ids": taken})   # nothing was sent: back to «Новый»
+            except Exception:
+                log.exception("Возврат лидов в «Новые» после удаления кампании")
 
     def emergency_stop(self) -> dict:
         self.store.set_setting("emergency_stop", True)

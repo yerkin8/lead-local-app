@@ -166,12 +166,13 @@ async function mailingBatchIds(filters, limit) {
 async function mailingCompose(node, o) {
   const f = state.mailingFromLeads;
   const limit = o.policy.batch_limit || 100;
-  if (!f.ids) f.ids = await mailingBatchIds(f.filters, limit);
+  // A batch for a first message is taken only from «Новые» (N34), whatever tab «Лиды» showed.
+  if (!f.ids) f.ids = await mailingBatchIds({...(f.filters || {}), segment: 'new'}, limit);
   const scripts = await call('mailing_scripts', '');
   const usable = o.accounts.filter(a => a.status !== 'needs_login' && a.status !== 'quarantine' && !a.is_test);
   if (!f.accounts.length) f.accounts = usable.map(a => String(a.id));
   const fl = f.filters || {};
-  const what = [ML_SEGMENTS[fl.segment] || 'Новые', fl.niche, fl.city, fl.site_type ? ML.site[fl.site_type] : '', fl.q ? `«${fl.q}»` : ''].filter(Boolean).join(' · ');
+  const what = ['Новые', fl.niche, fl.city, fl.site_type ? ML.site[fl.site_type] : '', fl.q ? `«${fl.q}»` : ''].filter(Boolean).join(' · ');
   setHeader('Рассылка по пачке лидов', `${what} · ${f.ids.length} ${f.ids.length === limit ? `(лимит пачки ${limit} из «Настроек»)` : 'лидов'}`);
   node.innerHTML = `${mlEmergency(o)}<form id="ml-compose-form" class="detail-stack"><section class="panel"><span class="section-kicker">ПАЧКА ИЗ «ЛИДОВ»</span><h2>${E(f.ids.length)} получателей · ${E(what)}</h2>
       <div class="form-grid"><label class="field">Название кампании<input name="title" maxlength="120" value="${E(f.title)}" placeholder="${E(what)}"></label>
